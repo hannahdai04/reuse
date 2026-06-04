@@ -1,0 +1,24 @@
+experiment_name: strategyqa_seed50_macnet_openai
+dataset:
+  builder: strategyqa
+  data_path: data/real_samples/strategyqa_dev_full.json
+  split: dev
+  limit: 50
+  offset: 0
+task:
+  type: qa
+mas:
+  type: macnet
+llm:
+  provider: openai-compatible
+  model: ${OPENAI_MODEL}
+  timeout: 90
+  retries: 2
+  temperature: 0
+  max_tokens: 32
+  extra_body:
+    enable_thinking: false
+memory:
+  provider: null
+output:
+  dir: runs

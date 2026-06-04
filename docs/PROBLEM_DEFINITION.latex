@@ -1,0 +1,58 @@
+\subsection{Problem Formulation}
+
+We study the problem of \emph{cross-task experience memory reuse scope estimation} in LLM-based multi-agent systems. Consider a multi-agent system with a set of agents
+\begin{equation}
+\mathcal{A}=\{a_1,a_2,\ldots,a_n\},
+\end{equation}
+where each agent may have different roles, capabilities, and tool environments. During previous tasks, the system produces a collection of execution trajectories
+\begin{equation}
+\mathcal{T}=\{\tau_1,\tau_2,\ldots,\tau_N\}.
+\end{equation}
+Each trajectory consists of multi-step interactions among agents, including actions, observations, intermediate memories, tool outputs, and final outcomes.
+
+From these historical trajectories, we extract a set of experience memory units:
+\begin{equation}
+\mathcal{E}=\{e_1,e_2,\ldots,e_m\}.
+\end{equation}
+Each experience memory unit is represented as
+\begin{equation}
+e_i=(c_i^{src}, a_i^{src}, r_i^{src}, o_i^{src}, y_i^{src}, p_i),
+\end{equation}
+where $c_i^{src}$ denotes the source task context, $a_i^{src}$ denotes the source agent that produced the experience, $r_i^{src}$ denotes the source agent role, $o_i^{src}$ denotes the corresponding action-observation pattern, $y_i^{src}$ denotes the observed outcome or utility of the experience, and $p_i$ denotes its provenance information, such as source task, tool environment, reliability, and access constraints.
+
+Given a new target task, we denote the current multi-agent context as
+\begin{equation}
+c_t=(q_t, A_t, R_t, Env_t, M_t, H_t),
+\end{equation}
+where $q_t$ is the current task objective, $A_t$ is the set of available agents, $R_t$ denotes their roles, $Env_t$ denotes the current tool and environment configuration, $M_t$ is the shared memory state, and $H_t$ is the current execution history.
+
+The goal is not merely to retrieve semantically relevant memories, but to estimate whether and how each candidate experience memory should be reused under the current multi-agent context. We therefore define a scope-aware memory reuse function:
+\begin{equation}
+F_{\theta}(e_i,c_t)\rightarrow (s_i,\rho_i,\pi_i),
+\end{equation}
+where $s_i$ is the compatibility score between experience $e_i$ and context $c_t$, $\rho_i$ is the predicted reuse scope, and $\pi_i$ is the corresponding memory reuse policy.
+
+The reuse scope $\rho_i$ can be defined over a multi-granularity scope space:
+\begin{equation}
+\rho_i \in \{\mathrm{mask}, \mathrm{local}, \mathrm{same\mbox{-}task}, \mathrm{same\mbox{-}task\mbox{-}family},
+\mathrm{same\mbox{-}agent}, \mathrm{same\mbox{-}role}, \mathrm{same\mbox{-}tool},
+\mathrm{cross\mbox{-}role}, \mathrm{cross\mbox{-}task}, \mathrm{global}\}.
+\end{equation}
+The memory reuse policy $\pi_i$ specifies how the experience should be used:
+\begin{equation}
+\pi_i \in \{\mathrm{reuse}, \mathrm{route\mbox{-}to\mbox{-}agent}, \mathrm{abstract\mbox{-}then\mbox{-}reuse},
+\mathrm{phase\mbox{-}specific\mbox{-}reuse}, \mathrm{mask}, \mathrm{deny}\}.
+\end{equation}
+
+Thus, the proposed task requires the model to determine not only whether an experience memory is relevant, but also whether it is compatible with the current task-agent-environment context, which agent should receive it, what scope it should be reused within, and whether it should be masked to avoid negative transfer.
+
+Formally, the selected reusable experience memories are
+\begin{equation}
+\mathcal{E}^{*}=\{e_i \mid s_i>\delta,\ \rho_i \neq \mathrm{mask}\},
+\end{equation}
+where $\delta$ is a compatibility threshold. These selected memories are then routed to the corresponding agents according to their predicted scopes and policies.
+
+The overall objective is to maximize the utility of experience reuse while reducing the risk of inappropriate reuse:
+\begin{equation}
+\max_{\theta}\ \mathbb{E}[U(\mathcal{E}^{*},c_t)]-\lambda \mathbb{E}[R(\mathcal{E}^{*},c_t)],
+\end{equation}

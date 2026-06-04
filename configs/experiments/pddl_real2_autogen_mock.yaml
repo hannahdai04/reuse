@@ -1,0 +1,17 @@
+experiment_name: pddl_real2_autogen_mock
+dataset:
+  builder: pddl
+  data_path: data/real_samples/pddl/ipc-2000/blocks-strips-typed
+  split: default
+  limit: 2
+task:
+  type: formal_planning
+mas:
+  type: autogen
+llm:
+  provider: mock
+  model: mock-llm
+memory:
+  provider: null
+output:
+  dir: runs

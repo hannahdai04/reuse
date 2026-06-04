@@ -1,0 +1,17 @@
+experiment_name: hotpotqa_real5_autogen_mock
+dataset:
+  builder: hotpotqa
+  data_path: data/real_samples/hotpotqa_dev_real_5.json
+  split: dev
+  limit: 5
+task:
+  type: qa
+mas:
+  type: autogen
+llm:
+  provider: mock
+  model: mock-llm
+memory:
+  provider: null
+output:
+  dir: runs

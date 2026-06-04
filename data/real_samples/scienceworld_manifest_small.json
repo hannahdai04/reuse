@@ -1,0 +1,29 @@
+[
+  {
+    "id": "scienceworld_use_thermometer_var_0",
+    "split": "dev",
+    "task_id": "2-1",
+    "task_name": "use-thermometer",
+    "variation_id": 0,
+    "simplification": "easy",
+    "instruction": "Use a thermometer to complete the ScienceWorld task."
+  },
+  {
+    "id": "scienceworld_use_thermometer_var_1",
+    "split": "dev",
+    "task_id": "2-1",
+    "task_name": "use-thermometer",
+    "variation_id": 1,
+    "simplification": "easy",
+    "instruction": "Use a thermometer to complete the ScienceWorld task."
+  },
+  {
+    "id": "scienceworld_use_thermometer_var_2",
+    "split": "dev",
+    "task_id": "2-1",
+    "task_name": "use-thermometer",
+    "variation_id": 2,
+    "simplification": "easy",
+    "instruction": "Use a thermometer to complete the ScienceWorld task."
+  }
+]

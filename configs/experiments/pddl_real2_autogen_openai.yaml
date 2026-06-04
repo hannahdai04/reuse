@@ -1,0 +1,23 @@
+experiment_name: pddl_real2_autogen_openai
+dataset:
+  builder: pddl
+  data_path: data/real_samples/pddl/ipc-2000/blocks-strips-typed
+  split: default
+  limit: 2
+task:
+  type: formal_planning
+mas:
+  type: autogen
+llm:
+  provider: openai-compatible
+  model: ${OPENAI_MODEL}
+  timeout: 30
+  retries: 0
+  temperature: 0
+  max_tokens: 128
+  extra_body:
+    enable_thinking: false
+memory:
+  provider: null
+output:
+  dir: runs

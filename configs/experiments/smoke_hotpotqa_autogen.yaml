@@ -1,0 +1,17 @@
+experiment_name: smoke_hotpotqa_autogen
+dataset:
+  builder: hotpotqa
+  data_path: data/samples/hotpotqa_sample.json
+  split: dev
+  limit: 2
+task:
+  type: qa
+mas:
+  type: autogen
+llm:
+  provider: mock
+  model: mock-llm
+memory:
+  provider: null
+output:
+  dir: runs

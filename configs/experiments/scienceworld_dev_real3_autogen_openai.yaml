@@ -1,0 +1,37 @@
+experiment_name: scienceworld_dev_real3_autogen_openai
+
+dataset:
+  builder: scienceworld
+  data_path: data/real_samples/scienceworld_manifest_small.json
+  split: dev
+  limit: 3
+
+task:
+  type: interactive
+  max_steps: 30
+
+mas:
+  type: autogen
+
+llm:
+  provider: openai-compatible
+  model: ${OPENAI_MODEL}
+  timeout: 45
+  retries: 0
+  temperature: 0
+  max_tokens: 64
+  extra_body:
+    enable_thinking: false
+
+memory:
+  provider: null
+
+environment:
+  provider: scienceworld
+  config:
+    env_step_limit: 30
+    simplification: easy
+    generate_gold_path: false
+
+output:
+  dir: runs

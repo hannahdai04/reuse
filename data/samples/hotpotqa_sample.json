@@ -1,0 +1,20 @@
+[
+  {
+    "_id": "hotpot_001",
+    "question": "What city is the Eiffel Tower located in?",
+    "answer": "Paris",
+    "supporting_facts": [["Eiffel Tower", 0]],
+    "context": [["Eiffel Tower", ["The Eiffel Tower is located in Paris.", "It is a landmark in France."]]],
+    "type": "bridge",
+    "level": "easy"
+  },
+  {
+    "_id": "hotpot_002",
+    "question": "Which country contains Paris?",
+    "answer": "France",
+    "supporting_facts": [["Paris", 0]],
+    "context": [["Paris", ["Paris is the capital and most populous city of France."]]],
+    "type": "bridge",
+    "level": "easy"
+  }
+]

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mas-scope"
+version = "0.1.0"
+description = "Phase-1 infrastructure for LLM-based multi-agent memory scope research."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.0",
+  "PyYAML>=6.0",
+  "typer>=0.12",
+  "httpx>=0.25",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mas-scope = "mas_scope.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mas_scope"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

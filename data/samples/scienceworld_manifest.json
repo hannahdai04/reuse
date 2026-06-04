@@ -1,0 +1,11 @@
+[
+  {
+    "id": "scienceworld_001",
+    "split": "dev",
+    "task_id": "2-1",
+    "task_name": "use-thermometer",
+    "variation_id": 0,
+    "instruction": "Measure the temperature of the water.",
+    "simplification": "easy"
+  }
+]

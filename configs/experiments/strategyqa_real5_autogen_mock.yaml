@@ -1,0 +1,17 @@
+experiment_name: strategyqa_real5_autogen_mock
+dataset:
+  builder: strategyqa
+  data_path: data/real_samples/strategyqa_dev_real_5.json
+  split: dev
+  limit: 5
+task:
+  type: qa
+mas:
+  type: autogen
+llm:
+  provider: mock
+  model: mock-llm
+memory:
+  provider: null
+output:
+  dir: runs

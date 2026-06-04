@@ -1,0 +1,17 @@
+[
+  {
+    "qid": "strategy_001",
+    "term": "penguin",
+    "question": "Can penguins fly?",
+    "answer": false,
+    "facts": ["Penguins are flightless birds."],
+    "decomposition": ["Are penguins birds?", "Can penguins fly?"]
+  },
+  {
+    "qid": "strategy_002",
+    "question": "Is water wet?",
+    "answer": "yes",
+    "facts": ["Water is a liquid that wets many surfaces."],
+    "decomposition": ["What is water?", "Does water wet surfaces?"]
+  }
+]
