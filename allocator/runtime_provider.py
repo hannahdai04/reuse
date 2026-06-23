@@ -28,6 +28,8 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
         masking_max_tokens: int = 1200,
         selection_max_tokens: int = 1000,
         realization_max_tokens: int = 1600,
+        stage_cache_records: dict[str, dict[str, Any]] | None = None,
+        stage_cache_source: dict[str, Any] | None = None,
     ) -> None:
         if setting not in {"B1", "B2", "B3", "B4", "G2", "G3"}:
             raise ValueError(f"Unsupported allocator setting: {setting}.")
@@ -41,6 +43,8 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
         self.masking_max_tokens = masking_max_tokens
         self.selection_max_tokens = selection_max_tokens
         self.realization_max_tokens = realization_max_tokens
+        self.stage_cache_records = stage_cache_records or {}
+        self.stage_cache_source = stage_cache_source or {}
         self.records: dict[str, dict[str, Any]] = {}
         self.last_retrieval_metadata: dict[str, Any] = {}
 
@@ -65,6 +69,10 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
             return record
 
         retrieved = self._candidate_memories(example)
+        cache_record = self._compatible_stage_cache(example, agents, retrieved)
+        cache_metadata = self._cache_metadata(cache_record)
+        if cache_record and cache_record.get("retrieved_memories"):
+            retrieved = [dict(memory) for memory in cache_record["retrieved_memories"]]
         allocator_errors: list[str] = []
         if self.setting == "B1":
             mask_matrix = [[1 for _ in agents] for _ in retrieved]
@@ -82,8 +90,19 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
             realized = realize_memories(self.allocator_llm, example, retrieved, agents, selected_matrix, use_llm=False)
             cap_stats = _empty_cap_stats(agents)
         else:
-            if self.setting in {"G2", "G3"}:
+            cached_mask = _valid_matrix(cache_record.get("mask_matrix") if cache_record else None, len(retrieved), len(agents))
+            if cached_mask is not None and self.setting in {"B3", "B4", "G3"}:
+                mask_matrix = cached_mask
+                agent_score_matrix = _score_matrix_from_mask(mask_matrix, agents)
+                mask_reasons = _mask_reasons_from_matrix(retrieved, mask_matrix)
+                cache_metadata["cache_hit"] = True
+                _add_reused_stages(cache_metadata, ["retrieval", "masking"])
+            elif self.setting in {"G2", "G3"}:
                 mask = self._chunked_mask(example, retrieved, agents)
+                mask_matrix = mask["mask_matrix"]
+                agent_score_matrix = mask.get("agent_score_matrix") or _score_matrix_from_mask(mask_matrix, agents)
+                mask_reasons = mask["mask_reasons"]
+                allocator_errors.extend(mask.get("errors") or [])
             else:
                 mask = generate_mask(
                     self.allocator_llm,
@@ -92,10 +111,10 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
                     agents,
                     max_tokens=self.masking_max_tokens,
                 )
-            mask_matrix = mask["mask_matrix"]
-            agent_score_matrix = mask.get("agent_score_matrix") or [[1.0 if int(value) else 0.0 for value in row] for row in mask_matrix]
-            mask_reasons = mask["mask_reasons"]
-            allocator_errors.extend(mask.get("errors") or [])
+                mask_matrix = mask["mask_matrix"]
+                agent_score_matrix = mask.get("agent_score_matrix") or _score_matrix_from_mask(mask_matrix, agents)
+                mask_reasons = mask["mask_reasons"]
+                allocator_errors.extend(mask.get("errors") or [])
             cap_result = apply_allowed_cap(
                 retrieved,
                 agents,
@@ -109,18 +128,28 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
             if self.setting in {"B2", "G2"}:
                 selected_matrix = [list(row) for row in mask_matrix]
             else:
-                selection = select_memories(
-                    self.allocator_llm,
-                    example,
-                    retrieved,
-                    agents,
-                    mask_matrix,
-                    self.per_agent_memory_k,
-                    use_llm=True,
-                    max_tokens=self.selection_max_tokens,
+                cached_selected = _valid_matrix(
+                    cache_record.get("selected_matrix") if cache_record else None,
+                    len(retrieved),
+                    len(agents),
                 )
-                selected_matrix = selection["selected_matrix"]
-                allocator_errors.extend(selection.get("errors") or [])
+                if cached_selected is not None and self.setting == "B4":
+                    selected_matrix = cached_selected
+                    cache_metadata["cache_hit"] = True
+                    _add_reused_stages(cache_metadata, ["retrieval", "masking", "selection"])
+                else:
+                    selection = select_memories(
+                        self.allocator_llm,
+                        example,
+                        retrieved,
+                        agents,
+                        mask_matrix,
+                        self.per_agent_memory_k,
+                        use_llm=True,
+                        max_tokens=self.selection_max_tokens,
+                    )
+                    selected_matrix = selection["selected_matrix"]
+                    allocator_errors.extend(selection.get("errors") or [])
             realized = realize_memories(
                 self.allocator_llm,
                 example,
@@ -150,9 +179,39 @@ class AllocatorRuntimeMemoryProvider(MemoryProvider):
             "realized_memories": realized["realized_memories"],
             "task_result": None,
             "allocator_errors": allocator_errors,
+            "cache_metadata": cache_metadata,
         }
         self.records[example.example_id] = record
         return record
+
+    def _compatible_stage_cache(
+        self,
+        example: TaskExample,
+        agents: list[str],
+        current_retrieved: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        record = self.stage_cache_records.get(example.example_id)
+        if not record:
+            return None
+        if record.get("target_task_id") != example.example_id:
+            return None
+        if list(record.get("agents") or []) != agents:
+            return None
+        cached_retrieved = record.get("retrieved_memories") or []
+        if _memory_ids(cached_retrieved) != _memory_ids(current_retrieved):
+            return None
+        return record
+
+    def _cache_metadata(self, cache_record: dict[str, Any] | None) -> dict[str, Any]:
+        source = dict(self.stage_cache_source)
+        return {
+            "stage_cache_mode": source.get("mode", "off"),
+            "cache_hit": bool(cache_record),
+            "source_setting": source.get("source_setting") if cache_record else None,
+            "source_path": source.get("source_path") if cache_record else None,
+            "source_cache_status": cache_record.get("cache_status") if cache_record else None,
+            "reused_stages": ["retrieval"] if cache_record else [],
+        }
 
     def _candidate_memories(self, example: TaskExample) -> list[dict[str, Any]]:
         if self.setting in {"G2", "G3"}:
@@ -249,6 +308,50 @@ def _public_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "evidence": memory.get("evidence"),
         "text": memory.get("text"),
     }
+
+
+def _memory_ids(memories: list[dict[str, Any]]) -> list[str]:
+    return [str(memory.get("memory_id")) for memory in memories]
+
+
+def _add_reused_stages(metadata: dict[str, Any], stages: list[str]) -> None:
+    reused = metadata.setdefault("reused_stages", [])
+    for stage in stages:
+        if stage not in reused:
+            reused.append(stage)
+
+
+def _valid_matrix(matrix: Any, rows: int, cols: int) -> list[list[int]] | None:
+    if not isinstance(matrix, list) or len(matrix) != rows:
+        return None
+    clean: list[list[int]] = []
+    for row in matrix:
+        if not isinstance(row, list) or len(row) != cols:
+            return None
+        try:
+            clean.append([1 if int(value) else 0 for value in row])
+        except (TypeError, ValueError):
+            return None
+    return clean
+
+
+def _score_matrix_from_mask(mask_matrix: list[list[int]], agents: list[str]) -> list[list[float]]:
+    return [[1.0 if col < len(row) and int(row[col]) else 0.0 for col in range(len(agents))] for row in mask_matrix]
+
+
+def _mask_reasons_from_matrix(memories: list[dict[str, Any]], mask_matrix: list[list[int]]) -> list[dict[str, str]]:
+    reasons: list[dict[str, str]] = []
+    for row, memory in enumerate(memories):
+        mask = mask_matrix[row] if row < len(mask_matrix) else []
+        total = sum(int(value) for value in mask)
+        if total == 0:
+            tag = "rejected"
+        elif total == len(mask):
+            tag = "broadcast"
+        else:
+            tag = "routed"
+        reasons.append({"memory_id": str(memory.get("memory_id")), "reason_tag": tag})
+    return reasons
 
 
 def apply_allowed_cap(

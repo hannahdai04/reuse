@@ -26,17 +26,24 @@ class BaseTask(ABC):
         memories = context.get("memories") or []
         if not memories:
             return ""
-        lines = ["Reusable experience memories:"]
+        metadata = context.get("memory_metadata") or {}
+        current_agent = str(metadata.get("current_agent") or "").lower()
+        if "critic" in current_agent or "verifier" in current_agent:
+            title = "Critic Verification Checklist"
+        elif "summarizer" in current_agent or "final" in current_agent or "proxy" in current_agent:
+            title = "Final Adjudication Checklist"
+        elif "actor" in current_agent or "reasoner" in current_agent or "assistant" in current_agent:
+            title = "Actor Operating Rules"
+        else:
+            title = "Reusable Operating Rules"
+        lines = [
+            title + ":",
+            "Use these memories as process guidance for this agent role. They are not evidence or facts for the current task.",
+        ]
         for index, memory in enumerate(memories, start=1):
-            decision = memory.get("decision") or {}
-            score = decision.get("score", "")
-            policy = decision.get("policy", "")
-            source = memory.get("source_example_id") or memory.get("source_run_id") or "unknown"
-            memory_id = memory.get("memory_id") or f"memory-{index}"
             text = str(memory.get("text") or memory.get("o_src") or "").replace("\r", " ").strip()
             if len(text) > 700:
                 text = text[:700] + "...[truncated]"
-            lines.append(f"[MEM-{index}] id={memory_id} score={score} policy={policy} source={source}")
-            lines.append(f"content: {text}")
-        lines.append("Use these only when compatible. Do not violate the task output protocol.")
+            lines.append(f"M{index}. {text}")
+        lines.append("Apply compatible rules while following Target Evidence, Task Requirements, and the Output Contract.")
         return "\n".join(lines) + "\n"

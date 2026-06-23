@@ -10,6 +10,14 @@ from mas_scope.mas.camel_style import CAMELStyleMAS
 from mas_scope.mas.dylan_style import DyLANStyleMAS
 from mas_scope.mas.macnet_style import MacNetStyleMAS
 from mas_scope.memory.null_memory import NullMemoryProvider
+from mas_scope.prompts.templates import (
+    MACNET_ACTOR_SYSTEM_PROMPT_TEMPLATE,
+    MACNET_ACTOR_USER_PROMPT_TEMPLATE,
+    MACNET_CRITIC_SYSTEM_PROMPT_TEMPLATE,
+    MACNET_CRITIC_USER_PROMPT_TEMPLATE,
+    MACNET_SUMMARIZER_SYSTEM_PROMPT_TEMPLATE,
+    MACNET_SUMMARIZER_USER_PROMPT_TEMPLATE,
+)
 from mas_scope.tasks.qa import QATask
 
 
@@ -86,6 +94,19 @@ def test_macnet_init_and_run():
     assert trajectory.final_answer == trajectory.messages[-1].content
     assert trajectory.metadata["mas_style"] == "macnet"
     assert trajectory.metadata["edges"]
+
+
+def test_macnet_templates_apply_operating_rules_without_empty_observation():
+    actor_prompt = MACNET_ACTOR_USER_PROMPT_TEMPLATE.format(task_description="Task", observation="")
+
+    assert "Observation:" not in actor_prompt
+    assert "process guidance" in MACNET_ACTOR_SYSTEM_PROMPT_TEMPLATE
+    assert "Target Evidence only" in actor_prompt
+    assert "Return one line only" in actor_prompt
+    assert "Critic Verification Checklist" in MACNET_CRITIC_SYSTEM_PROMPT_TEMPLATE
+    assert "bridge entity" in MACNET_CRITIC_USER_PROMPT_TEMPLATE
+    assert "Final Adjudication Checklist" in MACNET_SUMMARIZER_SYSTEM_PROMPT_TEMPLATE
+    assert "answer type, answer granularity" in MACNET_SUMMARIZER_USER_PROMPT_TEMPLATE
 
 
 def test_camel_run_returns_trajectory():

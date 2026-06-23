@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -30,6 +31,14 @@ from mas_scope.tasks.qa import QATask  # noqa: E402
 
 
 SETTINGS = {"B0", "B1", "B2", "B3", "B4", "G2", "G3"}
+CACHE_VERSION = 1
+ALLOCATOR_PROMPT_VERSION = 3
+UPSTREAM_STAGE_SETTINGS = {
+    "B2": ["B1"],
+    "B3": ["B2"],
+    "B4": ["B3", "B2"],
+    "G3": ["G2"],
+}
 
 
 class NoOpAllocatorLLM:
@@ -37,6 +46,36 @@ class NoOpAllocatorLLM:
 
     def generate(self, messages: list[dict], **kwargs):
         raise RuntimeError("Allocator LLM should not be called for this setting.")
+
+
+class PromptTraceLLM:
+    """Wraps an LLM and writes every generate call to JSONL for debugging."""
+
+    def __init__(self, llm: Any, output_path: Path, trace_type: str) -> None:
+        self.llm = llm
+        self.output_path = output_path
+        self.trace_type = trace_type
+        self.model_name = llm.model_name
+        self.call_index = 0
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def generate(self, messages: list[dict], **kwargs):
+        self.call_index += 1
+        response = self.llm.generate(messages, **kwargs)
+        _append_jsonl(
+            self.output_path,
+            {
+                "trace_type": self.trace_type,
+                "call_index": self.call_index,
+                "model_name": self.model_name,
+                "kwargs": _jsonable(kwargs),
+                "messages": messages,
+                "response": response.content,
+                "usage": response.usage,
+                "raw": response.raw,
+            },
+        )
+        return response
 
 
 def main(argv: list[str] | None = None) -> Path:
@@ -58,11 +97,17 @@ def main(argv: list[str] | None = None) -> Path:
     mas = registry.get_mas(args.mas_type)()
     task_llm = create_llm(args.task_provider, args.mas_model, args.task_timeout, args.task_retries, args.task_max_tokens)
     memories = [] if args.setting == "B0" else load_memories(args.memory_file)
+    cache_config_key = _stage_cache_config_key(args)
+    stage_cache_records, stage_cache_source = _load_upstream_stage_cache(args, output_dir, cache_config_key)
     allocator_llm = (
         NoOpAllocatorLLM()
         if args.setting in {"B0", "B1"}
         else create_llm(args.allocator_provider, args.allocator_model, args.allocator_timeout, args.allocator_retries, args.allocator_max_tokens)
     )
+    if args.save_prompt_traces:
+        task_llm = PromptTraceLLM(task_llm, output_dir / "mas_prompt_trace.jsonl", "mas")
+        if args.setting not in {"B0", "B1"}:
+            allocator_llm = PromptTraceLLM(allocator_llm, output_dir / "allocator_prompt_trace.jsonl", "allocator")
 
     manifest = {
         "setting": args.setting,
@@ -84,6 +129,10 @@ def main(argv: list[str] | None = None) -> Path:
         "mask_allowed_per_agent_k": args.mask_allowed_per_agent_k,
         "memory_count": len(memories),
         "resume_skipped": len(examples) - len(examples_to_run),
+        "stage_cache_mode": args.stage_cache_mode,
+        "stage_cache_config_key": cache_config_key,
+        "stage_cache_source": stage_cache_source,
+        "save_prompt_traces": args.save_prompt_traces,
     }
     _write_json(output_dir / "manifest.json", manifest)
 
@@ -106,6 +155,8 @@ def main(argv: list[str] | None = None) -> Path:
                 masking_max_tokens=args.allocator_max_tokens,
                 selection_max_tokens=args.allocator_max_tokens,
                 realization_max_tokens=args.allocator_max_tokens,
+                stage_cache_records=stage_cache_records,
+                stage_cache_source=stage_cache_source,
             )
         )
         try:
@@ -141,6 +192,9 @@ def main(argv: list[str] | None = None) -> Path:
 
         record = _allocation_record(args, example, mas, provider, result)
         _append_jsonl(output_dir / "allocation_records.jsonl", record)
+        for trace_row in record.get("agent_memory_trace") or []:
+            _append_jsonl(output_dir / "agent_memory_trace.jsonl", trace_row)
+        _append_jsonl(output_dir / "stage_cache.jsonl", _stage_cache_record(record, cache_config_key))
         _append_jsonl(output_dir / "results.jsonl", result)
         records.append(record)
         results.append(result)
@@ -177,6 +231,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allocator_timeout", type=float, default=90.0)
     parser.add_argument("--allocator_retries", type=int, default=1)
     parser.add_argument("--allocator_max_tokens", type=int, default=1200)
+    parser.add_argument("--stage_cache_mode", default="auto", choices=["auto", "off"])
+    parser.add_argument("--save_prompt_traces", action="store_true")
     parser.add_argument("--output_dir", required=True, type=Path)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
@@ -242,6 +298,15 @@ def _allocation_record(args, example, mas, provider, result: TaskResult) -> dict
             "realized_memories": {},
             "task_result": task_result,
             "allocator_errors": [],
+            "cache_metadata": {
+                "stage_cache_mode": args.stage_cache_mode,
+                "cache_hit": False,
+                "source_setting": None,
+                "source_path": None,
+                "source_cache_status": None,
+                "reused_stages": [],
+            },
+            "agent_memory_trace": [],
         }
     record = provider.get_record(example.example_id) or {
         "target_task_id": example.example_id,
@@ -253,10 +318,113 @@ def _allocation_record(args, example, mas, provider, result: TaskResult) -> dict
         "selected_matrix": [],
         "realized_memories": {},
         "allocator_errors": ["allocator_record_missing"],
+        "cache_metadata": {
+            "stage_cache_mode": args.stage_cache_mode,
+            "cache_hit": False,
+            "source_setting": None,
+            "source_path": None,
+            "source_cache_status": None,
+            "reused_stages": [],
+        },
     }
     record = dict(record)
     record["task_result"] = task_result
+    record["agent_memory_trace"] = _agent_memory_trace(record)
     return record
+
+
+def _agent_memory_trace(record: dict[str, Any]) -> list[dict[str, Any]]:
+    target_task_id = str(record.get("target_task_id") or "")
+    setting = str(record.get("setting") or "")
+    agents = [str(agent) for agent in record.get("agents") or []]
+    memories = record.get("retrieved_memories") or []
+    mask_matrix = record.get("mask_matrix") or []
+    selected_matrix = record.get("selected_matrix") or []
+    realized = record.get("realized_memories") or {}
+    task_result = record.get("task_result") or {}
+    reason_by_memory = {
+        str(item.get("memory_id")): str(item.get("reason_tag") or "")
+        for item in record.get("mask_reasons") or []
+    }
+    realized_by_pair = {
+        (str(agent), str(item.get("memory_id"))): item
+        for agent, items in realized.items()
+        for item in (items or [])
+    }
+
+    rows: list[dict[str, Any]] = []
+    for memory_index, memory in enumerate(memories):
+        memory_id = str(memory.get("memory_id") or "")
+        for agent_index, agent in enumerate(agents):
+            mask_allowed = _matrix_value(mask_matrix, memory_index, agent_index)
+            selected = _matrix_value(selected_matrix, memory_index, agent_index)
+            realization = realized_by_pair.get((agent, memory_id))
+            injected = realization is not None
+            if injected:
+                stage_status = "injected"
+            elif selected:
+                stage_status = "selected_missing_realization"
+            elif mask_allowed:
+                stage_status = "allowed_not_selected"
+            else:
+                stage_status = "rejected_by_mask"
+            rows.append(
+                {
+                    "target_task_id": target_task_id,
+                    "setting": setting,
+                    "agent": agent,
+                    "agent_index": agent_index,
+                    "memory_id": memory_id,
+                    "original_memory_id": memory.get("original_memory_id"),
+                    "memory_namespace": memory.get("memory_namespace"),
+                    "retrieval_rank": memory.get("retrieval_rank"),
+                    "retrieval_score": memory.get("retrieval_score"),
+                    "mask_allowed": bool(mask_allowed),
+                    "selected": bool(selected),
+                    "injected": bool(injected),
+                    "stage_status": stage_status,
+                    "mask_reason_tag": reason_by_memory.get(memory_id, ""),
+                    "realization_type": realization.get("realization_type") if realization else None,
+                    "realized_text": realization.get("text") if realization else None,
+                    "realized_text_length": len(str(realization.get("text") or "")) if realization else 0,
+                    "memory_condition": _short(memory.get("condition"), 360),
+                    "memory_experience": _short(memory.get("experience"), 520),
+                    "memory_text_preview": _short(memory.get("text"), 520),
+                    "task_success": bool(task_result.get("success")),
+                    "task_score": _task_score(task_result),
+                    "task_prediction": task_result.get("prediction"),
+                    "task_target": task_result.get("target"),
+                    "cache_hit": bool((record.get("cache_metadata") or {}).get("cache_hit")),
+                    "cache_source_setting": (record.get("cache_metadata") or {}).get("source_setting"),
+                    "allocator_error_count": len(record.get("allocator_errors") or []),
+                }
+            )
+    return rows
+
+
+def _matrix_value(matrix: list[list[Any]], row: int, col: int) -> int:
+    if row >= len(matrix) or col >= len(matrix[row]):
+        return 0
+    try:
+        return 1 if int(matrix[row][col]) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _short(value: Any, limit: int) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _task_score(result: dict[str, Any]) -> float:
+    metrics = result.get("metrics") or {}
+    for key in ("exact_match", "yes_no_accuracy", "success", "valid_action_format"):
+        if key in metrics and isinstance(metrics[key], (int, float, bool)):
+            return float(metrics[key])
+    numeric = [float(value) for value in metrics.values() if isinstance(value, (int, float, bool))]
+    if numeric:
+        return sum(numeric) / len(numeric)
+    return 1.0 if result.get("success") else 0.0
 
 
 def _success(metrics: dict) -> bool:
@@ -272,7 +440,15 @@ def _success(metrics: dict) -> bool:
 
 
 def _ensure_jsonl_files(output_dir: Path) -> None:
-    for name in ("examples.jsonl", "trajectories.jsonl", "results.jsonl", "errors.jsonl", "allocation_records.jsonl"):
+    for name in (
+        "examples.jsonl",
+        "trajectories.jsonl",
+        "results.jsonl",
+        "errors.jsonl",
+        "allocation_records.jsonl",
+        "agent_memory_trace.jsonl",
+        "stage_cache.jsonl",
+    ):
         path = output_dir / name
         if not path.exists():
             path.write_text("", encoding="utf-8")
@@ -307,6 +483,102 @@ def _write_json(path: Path, payload: Any) -> None:
     if hasattr(payload, "model_dump"):
         payload = payload.model_dump(mode="json")
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _stage_cache_config_key(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "memory_files_hash": _memory_files_hash(args.memory_file),
+        "mas_type": args.mas_type,
+        "retrieval_top_k": args.retrieval_top_k,
+        "global_chunk_size": args.global_chunk_size,
+        "mask_allowed_per_agent_k": args.mask_allowed_per_agent_k,
+        "per_agent_memory_k": args.per_agent_memory_k,
+        "candidate_mode": "global" if args.setting in {"G2", "G3"} else "retrieval",
+        "allocator_prompt_version": ALLOCATOR_PROMPT_VERSION,
+    }
+
+
+def _memory_files_hash(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: str(item)):
+        digest.update(str(path).replace("\\", "/").encode("utf-8"))
+        digest.update(b"\0")
+        if path.exists():
+            digest.update(path.read_bytes())
+        else:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _load_upstream_stage_cache(
+    args: argparse.Namespace,
+    output_dir: Path,
+    config_key: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    source = {
+        "mode": args.stage_cache_mode,
+        "source_setting": None,
+        "source_path": None,
+        "loaded_count": 0,
+        "rejected_count": 0,
+    }
+    if args.stage_cache_mode == "off":
+        return {}, source
+
+    for upstream_setting in UPSTREAM_STAGE_SETTINGS.get(args.setting, []):
+        path = output_dir.parent / upstream_setting / "stage_cache.jsonl"
+        if not path.exists():
+            continue
+        rows = _read_jsonl(path)
+        valid: dict[str, dict[str, Any]] = {}
+        rejected = 0
+        for row in rows:
+            if row.get("cache_version") != CACHE_VERSION or row.get("config_key") != config_key:
+                rejected += 1
+                continue
+            target_id = str(row.get("target_task_id") or "")
+            if target_id:
+                valid[target_id] = row
+        if valid:
+            source.update(
+                {
+                    "source_setting": upstream_setting,
+                    "source_path": str(path),
+                    "loaded_count": len(valid),
+                    "rejected_count": rejected,
+                }
+            )
+            return valid, source
+    return {}, source
+
+
+def _stage_cache_record(record: dict[str, Any], config_key: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target_task_id": record.get("target_task_id"),
+        "setting": record.get("setting"),
+        "cache_version": CACHE_VERSION,
+        "config_key": config_key,
+        "agents": record.get("agents") or [],
+        "retrieved_memories": record.get("retrieved_memories") or [],
+        "mask_matrix": record.get("mask_matrix") or [],
+        "selected_matrix": record.get("selected_matrix") or [],
+        "cache_status": "allocator_error" if record.get("allocator_errors") else "ok",
+    }
 
 
 if __name__ == "__main__":

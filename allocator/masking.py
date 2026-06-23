@@ -39,26 +39,35 @@ def _system_prompt() -> str:
     return """You are the Masking module in a four-stage memory allocator:
 Retrieval -> Masking -> Selection -> Realization.
 
-Your only job is Masking. Given a target task, ordered agents, and retrieved reusable experience memories, decide whether each memory is allowed for each agent.
+Your only job is Masking. Given a target task, ordered agents, and reusable experience memories, decide which agents can use each memory as an operating rule or checklist item.
 
 Decision meaning:
-- z_ij = 1: memory e_i is relevant and useful for agent a_j's role in the target task.
-- z_ij = 0: memory e_i should not be shown to agent a_j because it is irrelevant, noisy, redundant for that role, or could mislead the agent.
-- agent_scores[j] should be a confidence/usefulness score from 0.0 to 1.0 for agent a_j. Use 0.0 when mask is 0.
+- z_ij = 1: memory e_i can plausibly improve agent a_j's process on this target task.
+- z_ij = 0: memory e_i is clearly irrelevant, source-fact-only, answer-specific, unsupported, or likely to mislead agent a_j.
 
 Important constraints:
 - Do not solve the target task.
 - Do not choose the final memory budget; Selection will do that later.
 - Do not rewrite memories; Realization will do that later.
 - Do not treat producer_agent or producer_role as the future recipient. They are provenance only.
-- A memory about team coordination can be useful to multiple agents.
-- A memory about critic behavior is usually most useful to critic agents and sometimes summarizers.
-- A memory about actor reasoning or decomposition is usually useful to actor agents and sometimes critics.
-- A memory about summarization/aggregation is usually useful to summarizer agents.
-- If the memory contains source-task answers, entities, or facts, ignore those specifics and judge only the reusable lesson.
-- If uncertain, prefer 0 over over-sharing.
 
-Return only valid JSON. Do not include markdown or commentary. Use the exact memory_id values and a binary agent_mask aligned exactly with agent_order."""
+Quality gate before role assignment:
+- Memories are process guidance, not target facts. They may still be useful even when they are not about the same entities as the target task.
+- Use 1 for memories that give a reusable action, warning, verification check, decomposition habit, evidence-use habit, or answer-format habit that an agent can apply.
+- Reject only when the memory is clearly not transferable, mostly copies source facts or answers, contradicts the target task, is unsupported by its evidence, or would distract the agent.
+- Do not require exact dataset, entity, or question overlap. A memory can be useful through reasoning pattern, evidence handling, verification, or final-answer discipline.
+- Avoid both extremes: do not broadcast every memory to every agent, but also do not return all-zero masks unless every memory is clearly unusable.
+- For a typical top-k list, route the best few useful memories to the most relevant one or two agents.
+
+Role guidance:
+- Actor agents need memories about decomposition, evidence lookup, entity disambiguation, comparison, numerical extraction, bridge reasoning, and avoiding premature yes/no answers.
+- Critic agents need memories about checking whether an answer is supported by the target context, catching entity/type/date/number mismatches, and correcting malformed or underspecified answers.
+- The summarizer agent needs memories about choosing between candidates, preserving exact answer granularity, handling partial answers, and enforcing the final answer format.
+- Team coordination memories may be useful to several agents only when they directly prevent a likely handoff or aggregation failure.
+
+Return only valid compact JSON. Do not include markdown, commentary, reasons, scores, or extra fields.
+For each memory, output only memory_id and mask. The mask is a string of 0/1 characters aligned exactly with agent_order.
+Example: {"agent_order":["actor","critic"],"decisions":[{"memory_id":"m1","mask":"10"}]}"""
 
 
 def _user_prompt(example: TaskExample, memories: list[dict[str, Any]], agents: list[str]) -> str:
@@ -71,30 +80,21 @@ def _user_prompt(example: TaskExample, memories: list[dict[str, Any]], agents: l
         },
         "agent_order": agents,
         "decision_instructions": [
-            "Evaluate each memory-agent pair independently.",
-            "Use 1 only when the memory can change that agent's behavior in the target MAS run.",
-            "Use 0 when the memory is merely a source-task fact, final answer, generic advice, or not relevant to the agent role.",
-            "Keep masks sparse enough to avoid context pollution.",
+            "Treat each memory as an operating rule/checklist item, not as target-task evidence.",
+            "Assign 1 when an agent can plausibly use the memory to improve decomposition, evidence use, verification, aggregation, or answer formatting.",
+            "Assign 0 when the memory is clearly irrelevant to the agent role, source-fact-only, answer-specific, unsupported, or likely to mislead.",
+            "For HotpotQA, prefer memories that improve evidence grounding, entity disambiguation, bridge/comparison reasoning, answer granularity, or exact final format.",
+            "For StrategyQA, prefer memories that improve decomposition, yes/no consistency, fact-to-conclusion operations, and contradiction checks.",
+            "Use role-specific masks: usually route a useful memory to one or two suitable agents, not all agents.",
+            "Do not output all-zero masks for the whole list unless all candidate memories are clearly unusable.",
             "Every candidate memory must appear exactly once in decisions.",
-            "Each reasons list must have the same length and order as agent_order.",
         ],
-        "reason_tag_definitions": {
-            "role_match": "The memory directly matches this agent's role responsibility.",
-            "coordination": "The memory concerns communication, handoff, aggregation, or team-level behavior.",
-            "critic": "The memory concerns critique, verification, error detection, or feedback quality.",
-            "retrieval_noise": "The memory was retrieved but does not fit the target task.",
-            "context_noise": "The memory may distract or pollute the prompt for most agents.",
-            "not_applicable": "The reusable lesson does not apply to this target setting.",
-            "other": "Use only if none of the above tags fit.",
-        },
         "candidate_memories": [
             {
                 "memory_id": memory.get("memory_id"),
-                "condition": memory.get("condition"),
-                "experience": memory.get("experience"),
-                "evidence": memory.get("evidence"),
-                "source": memory.get("source"),
-                "text": str(memory.get("text") or "")[:900],
+                "condition": str(memory.get("condition") or "")[:260],
+                "experience": str(memory.get("experience") or "")[:360],
+                "evidence": str(memory.get("evidence") or "")[:220],
             }
             for memory in memories
         ],
@@ -103,10 +103,7 @@ def _user_prompt(example: TaskExample, memories: list[dict[str, Any]], agents: l
             "decisions": [
                 {
                     "memory_id": "memory id",
-                    "agent_mask": [0 for _ in agents],
-                    "agent_scores": [0.0 for _ in agents],
-                    "reasons": ["short per-agent reason aligned with agent_order"] * len(agents),
-                    "reason_tag": "role_match|coordination|critic|retrieval_noise|context_noise|not_applicable|other",
+                    "mask": "0" * len(agents),
                 }
             ],
         },
@@ -133,37 +130,15 @@ def _validate_payload(payload: dict[str, Any], memories: list[dict[str, Any]], a
         if memory_id not in known:
             errors.append(f"unknown_memory_id:{memory_id}")
             continue
-        mask = raw.get("agent_mask")
-        if not isinstance(mask, list) or len(mask) != len(agents):
+        mask = _parse_mask(raw, agents)
+        if mask is None:
             errors.append(f"invalid_mask:{memory_id}")
             continue
-        try:
-            clean_mask = [1 if int(value) else 0 for value in mask]
-        except (TypeError, ValueError):
-            errors.append(f"invalid_mask_value:{memory_id}")
-            continue
-        scores = raw.get("agent_scores")
-        if not isinstance(scores, list) or len(scores) != len(agents):
-            clean_scores = [1.0 if value else 0.0 for value in clean_mask]
-        else:
-            clean_scores = []
-            for value, mask_value in zip(scores, clean_mask):
-                try:
-                    score = float(value)
-                except (TypeError, ValueError):
-                    score = 1.0 if mask_value else 0.0
-                if not mask_value:
-                    score = 0.0
-                clean_scores.append(max(0.0, min(1.0, score)))
-        reasons = raw.get("reasons")
-        if not isinstance(reasons, list) or len(reasons) != len(agents):
-            reason_text = str(raw.get("reason") or raw.get("reason_tag") or "")
-            reasons = [reason_text for _ in agents]
+        clean_mask = mask
+        clean_scores = [1.0 if value else 0.0 for value in clean_mask]
         by_id[memory_id] = {
             "memory_id": memory_id,
-            "reasons": [str(reason) for reason in reasons],
-            "reason_tag": str(raw.get("reason_tag") or "other"),
-            "raw_reason": str(raw.get("reason") or ""),
+            "reason_tag": _reason_tag(clean_mask),
             "agent_mask": clean_mask,
             "agent_scores": clean_scores,
         }
@@ -177,26 +152,46 @@ def _validate_payload(payload: dict[str, Any], memories: list[dict[str, Any]], a
             errors.append(f"missing_decision:{memory_id}")
             mask = [0 for _ in agents]
             scores = [0.0 for _ in agents]
-            reasons = ["missing decision" for _ in agents]
             tag = "missing_decision"
-            raw_reason = ""
         else:
             mask = decision["agent_mask"]
             scores = decision["agent_scores"]
-            reasons = decision["reasons"]
             tag = decision["reason_tag"]
-            raw_reason = decision["raw_reason"]
         mask_matrix.append(mask)
         agent_score_matrix.append(scores)
         mask_reasons.append(
             {
                 "memory_id": memory_id,
-                "reasons": reasons,
                 "reason_tag": tag,
-                "raw_reason": raw_reason,
             }
         )
     return {"mask_matrix": mask_matrix, "agent_score_matrix": agent_score_matrix, "mask_reasons": mask_reasons, "errors": errors}
+
+
+def _parse_mask(raw: dict[str, Any], agents: list[str]) -> list[int] | None:
+    compact = raw.get("mask")
+    if isinstance(compact, str):
+        text = compact.strip()
+        if len(text) != len(agents) or any(char not in {"0", "1"} for char in text):
+            return None
+        return [1 if char == "1" else 0 for char in text]
+
+    legacy = raw.get("agent_mask")
+    if not isinstance(legacy, list) or len(legacy) != len(agents):
+        return None
+    try:
+        return [1 if int(value) else 0 for value in legacy]
+    except (TypeError, ValueError):
+        return None
+
+
+def _reason_tag(mask: list[int]) -> str:
+    total = sum(mask)
+    if total == 0:
+        return "rejected"
+    if total == len(mask):
+        return "broadcast"
+    return "routed"
 
 
 def _all_zero(memories: list[dict[str, Any]], agents: list[str], error: str) -> dict[str, Any]:
@@ -206,9 +201,7 @@ def _all_zero(memories: list[dict[str, Any]], agents: list[str], error: str) -> 
         "mask_reasons": [
             {
                 "memory_id": str(memory.get("memory_id")),
-                "reasons": [error for _ in agents],
                 "reason_tag": "allocator_error",
-                "raw_reason": error,
             }
             for memory in memories
         ],

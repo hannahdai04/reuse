@@ -73,6 +73,55 @@ def test_strategyqa_prompt_requires_yes_no():
     prompt = QATask().build_prompt(example, agent(), {})
 
     assert "answer must be exactly yes or no" in prompt
+    assert "boolean QA task" in prompt
+    assert "Do not output explanations" in prompt
+
+
+def test_hotpotqa_prompt_includes_dataset_requirements():
+    prompt = QATask().build_prompt(
+        example_with_input({"question": "Who is the spouse of the author?", "context": "Evidence."}),
+        agent(),
+        {},
+    )
+
+    assert "Task Requirements:" in prompt
+    assert "multi-hop evidence QA task" in prompt
+    assert "Use only Target Evidence as facts" in prompt
+    assert "Connect the relevant evidence pieces" in prompt
+    assert "minimal supported answer span or entity" in prompt
+    assert "Do not stop at a bridge entity" in prompt
+    assert "answer exactly yes or no" in prompt
+    assert "answer type, answer granularity" in prompt
+
+
+def test_memory_block_is_before_evidence_and_omits_metadata():
+    prompt = QATask().build_prompt(
+        example_with_input({"question": "Capital?", "context": "France context."}),
+        agent(),
+        {
+            "memory_metadata": {"current_agent": "critic agent 1"},
+            "memories": [
+                {
+                    "memory_id": "m1",
+                    "source_example_id": "seed",
+                    "text": "Check whether the answer is a complete entity name.",
+                    "decision": {"score": 0.9, "policy": "B3"},
+                }
+            ],
+        },
+    )
+
+    assert "Critic Verification Checklist:" in prompt
+    assert "memory is process guidance only" in prompt
+    assert "not evidence or facts for the current task" in prompt
+    assert "Check whether the answer is a complete entity name." in prompt
+    assert prompt.index("Critic Verification Checklist:") < prompt.index("Target Evidence:")
+    assert "id=" not in prompt
+    assert "score=" not in prompt
+    assert "policy=" not in prompt
+    assert "source=" not in prompt
+    assert "content:" not in prompt
+    assert "Observation:" not in prompt
 
 
 def test_parse_final_answer_fallback_strips_whitespace():

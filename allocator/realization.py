@@ -55,21 +55,24 @@ Your only job is Realization. Selection has already chosen which memories each a
 Realization goal:
 - Make the memory actionable for the receiving agent's role.
 - Preserve the reusable lesson, strategy, warning, or heuristic.
-- Remove irrelevant source-task details.
-- Avoid context pollution and keep the text concise.
+- Preserve concrete checks, decision criteria, failure warnings, and answer-format constraints from the original memory.
+- Remove irrelevant source-task details without removing the actionable mechanism.
+- Avoid context pollution, but do not over-compress into generic advice.
 
 Allowed realization_type values:
-- raw: keep the original reusable memory nearly unchanged when it is already concise and general.
-- abstract: generalize the source experience into a transferable rule.
-- warning: phrase it as a risk or failure mode to avoid.
-- agent_specific: tailor the advice to the receiving agent's role.
+- raw: keep the original reusable memory nearly unchanged when it is already actionable and transferable.
+- abstract: generalize source-specific details while preserving the concrete action/check.
+- warning: phrase a failure mode as a specific risk to check before answering.
+- agent_specific: tailor the advice to the receiving agent's role without losing the original operational detail.
 
 Hard constraints:
 - Do not solve the target task.
 - Do not add new facts about the target task.
 - Do not copy source-task final answers, entity names, dates, or task-specific facts unless they are necessary to understand the reusable lesson.
 - Do not mention that this came from a previous trajectory unless that is needed for evidence.
-- Do not output long summaries; each realized memory should usually be 1-3 sentences.
+- Do not output long summaries; each realized memory should usually be 1-2 short sentences or a compact checklist sentence.
+- Do not replace a concrete memory with vague advice like "verify carefully" or "use evidence"; include what to verify or how to use evidence.
+- If rewriting would weaken the memory, use realization_type raw and keep the original reusable text.
 - Keep the output useful even if the target task answer is unknown.
 
 Return only valid JSON. Do not include markdown or commentary. Use exact agent names and memory_id values."""
@@ -87,10 +90,13 @@ def _user_prompt(example: TaskExample, selected_pairs: list[dict[str, Any]], age
         "realization_instructions": [
             "Create exactly one realization for each selected_memory_agent_pair.",
             "The text field is what will be injected into the agent prompt.",
-            "Use agent_specific when the receiving role changes how the advice should be phrased.",
-            "Use warning when the memory mainly describes a failure mode.",
-            "Use abstract when the source memory includes many source-specific details.",
-            "Use raw only when the source text is already concise and transferable.",
+            "Keep the realized text as an operating rule/checklist item that the agent can apply before answering.",
+            "Preserve concrete checks, comparison direction, evidence-grounding steps, answer granularity, and format warnings when present.",
+            "Use raw when the source text is already actionable; do not rewrite just to make it shorter.",
+            "Use agent_specific only when the receiving role changes the action the agent should take.",
+            "Use warning when the memory mainly describes a specific failure mode to avoid.",
+            "Use abstract only to remove source-specific details while keeping the original action/check.",
+            "Avoid generic rewrites such as 'be careful', 'verify the answer', or 'use evidence' without a concrete check.",
         ],
         "selected_memory_agent_pairs": [
             {
@@ -132,7 +138,7 @@ def _validate_payload(
 
     by_agent = {agent: [] for agent in agents}
     raw_by_key = {
-        (item["agent"], str(item["memory_id"])): item
+        (agent, str(item["memory_id"])): item
         for agent, items in realized.items()
         for item in items
     }

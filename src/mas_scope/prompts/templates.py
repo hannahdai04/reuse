@@ -27,39 +27,44 @@ AUTOGEN_USER_PROXY_USER_PROMPT_TEMPLATE = (
 
 MACNET_ACTOR_SYSTEM_PROMPT_TEMPLATE = (
     "You are an independent solver for a {task_type} task. Use the provided task evidence, "
-    "think silently, and produce only the required final answer/action format."
+    "task requirements, and any role-specific operating rules. Treat memory as process guidance, "
+    "not task evidence. Think silently and produce only the required final answer/action format."
 )
 MACNET_ACTOR_USER_PROMPT_TEMPLATE = (
     "{task_description}\n"
-    "Observation: {observation}\n"
-    "Solve independently. For QA, return one line only: Final Answer: <short answer>. "
+    "Solve independently. For QA, first use any Actor Operating Rules to plan how to read evidence, "
+    "then answer from Target Evidence only. Return one line only: Final Answer: <short answer>. "
     "For yes/no questions, the answer must be exactly yes or no. "
     "For formal planning, return only grounded plan actions, one parenthesized action per line. "
     "For interactive tasks, return only one admissible action. "
     "Do not include reasoning, citations, markdown, bullets, repeated text, or copied prompt instructions."
 )
 MACNET_CRITIC_SYSTEM_PROMPT_TEMPLATE = (
-    "You are a verifier for a {task_type} task. Check the candidate against the task evidence "
-    "and the required output format. Return only a corrected final answer/action."
+    "You are a verifier for a {task_type} task. Check the candidate against Target Evidence, "
+    "Task Requirements, and any Critic Verification Checklist. Treat memory as verification guidance, "
+    "not task evidence. Return only a corrected final answer/action."
 )
 MACNET_CRITIC_USER_PROMPT_TEMPLATE = (
     "{task_description}\n"
     "Actor output: {actor_output}\n"
     "If the candidate is correct, copy it in the required final format. "
-    "If it is unsupported, malformed, verbose, repeated, or contradicts the evidence, correct it. "
+    "If it is unsupported, malformed, verbose, repeated, contradicts the evidence, answers a bridge entity "
+    "instead of the requested attribute, or has the wrong answer type, correct it. "
     "For QA, return exactly one line: Final Answer: <short answer>. "
     "For yes/no questions, the answer must be exactly yes or no. "
     "Do not explain your critique."
 )
 MACNET_SUMMARIZER_SYSTEM_PROMPT_TEMPLATE = (
-    "You are the final adjudicator for a {task_type} task. Choose the best verified answer/action "
-    "from the candidates and return only the required final output."
+    "You are the final adjudicator for a {task_type} task. Use Target Evidence, Task Requirements, "
+    "candidate answers, critic feedback, and any Final Adjudication Checklist to choose or repair the final output. "
+    "Do not treat memory as task evidence."
 )
 MACNET_SUMMARIZER_USER_PROMPT_TEMPLATE = (
     "{task_description}\n"
     "Feedback page 1:\n{feedback_page1}\n"
     "Feedback page 2:\n{feedback_page2}\n"
-    "Select the best supported candidate. For QA, return exactly one line: Final Answer: <short answer>. "
+    "Select the best supported candidate, or repair both candidates when they share the same task-requirement error. "
+    "For QA, check evidence support, answer type, answer granularity, and final format, then return exactly one line: Final Answer: <short answer>. "
     "For yes/no questions, the answer must be exactly yes or no. "
     "For formal planning, return only grounded plan actions, one parenthesized action per line. "
     "For interactive tasks, return only the final action. "
