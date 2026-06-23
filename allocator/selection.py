@@ -47,24 +47,31 @@ def _system_prompt(per_agent_k: int) -> str:
     return f"""You are the Selection module in a four-stage memory allocator:
 Retrieval -> Masking -> Selection -> Realization.
 
-Your only job is Selection. Masking has already decided which memories are allowed for each agent. For each agent, select at most {per_agent_k} memories from that agent's allowed list.
+Your only job is Selection. Masking has already produced each agent's allowed memory list. Select a compact but sufficient set of reusable experiences for final prompt injection.
 
 Selection goal:
-- Keep the most useful, least redundant memories for each agent.
-- Reduce context pollution.
-- Prefer memories that address likely failure modes of the agent's role on the target task.
+- Keep at most {per_agent_k} memories per agent, but preserve enough useful guidance for the agent to actually change behavior.
+- Masking already filtered obvious noise. Selection should mainly remove redundancy and fit the memory budget, not reject most allowed memories again.
+- Maximize behavior change: choose memories that tell the agent what to check, avoid, compare, preserve, or verify.
+- Minimize context pollution by removing duplicates, source-fact-only memories, and weak role fits.
 
 Decision rules:
 - Never select a memory that is not in allowed_memory_ids_by_agent for that agent.
-- Select fewer than {per_agent_k} memories if the allowed memories are weak, duplicate, or noisy.
-- Prefer specific operational advice over generic advice.
-- Prefer memories that change behavior: decomposition, verification, critique, aggregation, tool-use warnings, or failure correction.
-- Avoid selecting multiple memories that say the same thing.
 - Do not solve the target task.
 - Do not rewrite memory text; Realization will do that later.
 - Do not select memories because their source task has the same answer or entity.
+- If an agent has multiple allowed memories with distinct process value, select 2 to {per_agent_k} of them rather than collapsing to a single memory.
+- Output an empty list only when no allowed memory gives that agent any useful operating rule.
+- Prefer memories with a clear condition, actionable experience, and evidence-backed failure or success pattern.
+- Avoid selecting multiple memories that say the same thing; keep the most concrete one.
+- Prefer a diverse set: one evidence/reasoning rule, one verification or error-prevention rule, and one answer-format or aggregation rule when available.
 
-Return only valid JSON. Do not include markdown or commentary. Use exact agent names and memory_id values."""
+Role-specific ranking:
+- Actor agents: prefer decomposition, evidence grounding, entity disambiguation, comparison, number/date extraction, and avoiding unsupported yes/no shortcuts.
+- Critic agents: prefer verification checks, contradiction detection, answer granularity checks, and correcting unsupported or malformed candidates.
+- Summarizer agent: prefer candidate arbitration, exact answer preservation, partial-answer repair, and final-format discipline.
+
+Return only valid compact JSON. Do not include markdown, commentary, reasons, or extra fields. Use exact agent names and memory_id values."""
 
 
 def _user_prompt(
@@ -95,18 +102,21 @@ def _user_prompt(
             "For every agent in agent_order, output one selection object.",
             "memory_ids must be a subset of allowed_memory_ids_by_agent[agent].",
             "memory_ids length must be less than or equal to per_agent_memory_k.",
-            "It is valid to output an empty memory_ids list for an agent.",
-            "Rank the selected memory_ids from most useful to least useful.",
+            "Do not output an empty list if the agent has allowed memories with usable process guidance.",
+            "Rank selected memory_ids from most useful to least useful.",
+            "Select only memories that can change this agent's behavior on the target task.",
+            "When two or more allowed memories are useful and non-duplicate, select 2 to per_agent_memory_k memories.",
+            "Do not select source-specific facts, duplicate lessons, or memories that mainly restate the task format.",
+            "Prefer diversity across reasoning, evidence grounding, verification, aggregation, and final-format control.",
         ],
         "candidate_memories": [
             {
                 "memory_id": memory.get("memory_id"),
                 "retrieval_rank": memory.get("retrieval_rank"),
                 "retrieval_score": memory.get("retrieval_score"),
-                "condition": memory.get("condition"),
-                "experience": memory.get("experience"),
-                "evidence": memory.get("evidence"),
-                "text": str(memory.get("text") or "")[:800],
+                "condition": str(memory.get("condition") or "")[:260],
+                "experience": str(memory.get("experience") or "")[:380],
+                "evidence": str(memory.get("evidence") or "")[:220],
             }
             for memory in memories
         ],
@@ -116,7 +126,6 @@ def _user_prompt(
                 {
                     "agent": agent,
                     "memory_ids": [],
-                    "reason": "short reason",
                 }
                 for agent in agents
             ]

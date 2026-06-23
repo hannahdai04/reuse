@@ -62,13 +62,13 @@ def _overall_comparison_table(rows: list[dict[str, str]]) -> list[str]:
     output = [
         "## B0-B4 Comparison",
         "",
-        "| Setting | Success Rate | Average Score | Allocator Error Rate | Avg Retrieved | Mask Density | Avg Final Memories/Agent | Cap Drop Ratio |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Setting | Success Rate | Average Score | Allocator Error Rate | Avg Retrieved | Mask Density | Avg Final Memories/Agent | Avg Realized Len | Cap Drop Ratio |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for setting in SETTING_ORDER:
         row = by_setting.get(setting, {})
         output.append(
-            "| {setting} | {success:.3f} | {score:.3f} | {error:.3f} | {retrieved:.2f} | {mask:.3f} | {selected:.2f} | {cap:.3f} |".format(
+            "| {setting} | {success:.3f} | {score:.3f} | {error:.3f} | {retrieved:.2f} | {mask:.3f} | {selected:.2f} | {realized:.1f} | {cap:.3f} |".format(
                 setting=setting,
                 success=_float(row.get("success_rate")),
                 score=_float(row.get("average_score")),
@@ -76,6 +76,7 @@ def _overall_comparison_table(rows: list[dict[str, str]]) -> list[str]:
                 retrieved=_float(row.get("avg_retrieved_memory_count")),
                 mask=_float(row.get("mask_density")),
                 selected=_float(row.get("avg_final_memory_count_per_agent")),
+                realized=_float(row.get("avg_realized_memory_length")),
                 cap=_float(row.get("allowed_cap_dropped_ratio")),
             )
         )
@@ -84,8 +85,8 @@ def _overall_comparison_table(rows: list[dict[str, str]]) -> list[str]:
 
 def _dataset_comparison_table(rows: list[dict[str, str]]) -> list[str]:
     output = [
-        "| Dataset | Setting | Success Rate | Average Score | Allocator Error Rate | Avg Retrieved | Mask Density | Avg Final Memories/Agent | Cap Drop Ratio |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Dataset | Setting | Success Rate | Average Score | Allocator Error Rate | Avg Retrieved | Mask Density | Avg Final Memories/Agent | Avg Realized Len | Cap Drop Ratio |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     sorted_rows = sorted(
         rows,
@@ -96,7 +97,7 @@ def _dataset_comparison_table(rows: list[dict[str, str]]) -> list[str]:
     )
     for row in sorted_rows:
         output.append(
-            "| {dataset} | {setting} | {success:.3f} | {score:.3f} | {error:.3f} | {retrieved:.2f} | {mask:.3f} | {selected:.2f} | {cap:.3f} |".format(
+            "| {dataset} | {setting} | {success:.3f} | {score:.3f} | {error:.3f} | {retrieved:.2f} | {mask:.3f} | {selected:.2f} | {realized:.1f} | {cap:.3f} |".format(
                 dataset=row.get("dataset") or row.get("group") or "",
                 setting=row.get("setting") or "",
                 success=_float(row.get("success_rate")),
@@ -105,6 +106,7 @@ def _dataset_comparison_table(rows: list[dict[str, str]]) -> list[str]:
                 retrieved=_float(row.get("avg_retrieved_memory_count")),
                 mask=_float(row.get("mask_density")),
                 selected=_float(row.get("avg_final_memory_count_per_agent")),
+                realized=_float(row.get("avg_realized_memory_length")),
                 cap=_float(row.get("allowed_cap_dropped_ratio")),
             )
         )

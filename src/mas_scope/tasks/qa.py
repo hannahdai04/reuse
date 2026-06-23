@@ -36,16 +36,12 @@ class QATask(BaseTask):
         dataset_instruction = self._dataset_instruction(example)
         memory_section = self._memory_section(context)
         return (
-            f"Dataset: {example.dataset_name}\n"
             f"Question: {question}\n"
-            f"Sources:\n{source_text}\n"
-            f"{dataset_instruction}\n"
             f"{memory_section}"
-            "Answering protocol:\n"
-            "- Output exactly one line.\n"
-            "- Use this exact format: Final Answer: <answer>\n"
-            "- Do not include reasoning, citations, markdown, or extra text.\n"
-            "- Do not answer with a sentence when a short span or yes/no answer is sufficient."
+            f"Target Evidence:\n{source_text}\n"
+            f"Task Requirements:\n{dataset_instruction}\n"
+            "Output Contract: exactly one line: Final Answer: <answer>. "
+            "No reasoning, citations, markdown, or extra text. Use a short span or yes/no when sufficient."
         )
 
     def parse_final_answer(self, trajectory: Trajectory) -> str | dict | None:
@@ -85,10 +81,31 @@ class QATask(BaseTask):
     def _dataset_instruction(self, example: TaskExample) -> str:
         dataset_name = example.dataset_name.lower()
         if dataset_name == "strategyqa":
-            return "Dataset rule: this is a boolean QA task. The answer must be exactly yes or no."
-        if dataset_name == "hotpotqa":
-            return (
-                "Dataset rule: answer with the minimal span/entity from the evidence. "
-                "For yes/no comparison questions, answer exactly yes or no rather than naming the shared property."
+            return "\n".join(
+                [
+                    "- This is a boolean QA task.",
+                    "- The final answer must be exactly yes or no.",
+                    "- Use the provided facts or evidence when available.",
+                    "- Do not output explanations, caveats, citations, or full sentences.",
+                    "- Answer yes only when the evidence supports the statement; otherwise answer no.",
+                ]
             )
-        return "Dataset rule: answer with the shortest correct final answer."
+        if dataset_name == "hotpotqa":
+            return "\n".join(
+                [
+                    "- This is a multi-hop evidence QA task.",
+                    "- Use only Target Evidence as facts; memory is process guidance only.",
+                    "- Connect the relevant evidence pieces before answering.",
+                    "- Return the minimal supported answer span or entity.",
+                    "- Do not stop at a bridge entity when the question asks for that entity's property, role, title, location, nationality, date, author, spouse, organization, or other attribute.",
+                    "- For comparison or boolean questions, answer exactly yes or no when a boolean decision is requested.",
+                    "- If multiple entities are mentioned, verify that the final answer matches the entity and attribute requested by the question.",
+                    "- Before finalizing, check evidence support, answer type, answer granularity, and output format.",
+                ]
+            )
+        return "\n".join(
+            [
+                "- Answer using the provided evidence.",
+                "- Return the shortest correct final answer.",
+            ]
+        )

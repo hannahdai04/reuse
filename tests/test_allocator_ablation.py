@@ -8,6 +8,7 @@ from allocator.retrieval import load_memories, retrieve_top_k
 from allocator.runtime_provider import apply_allowed_cap
 from allocator.selection import select_memories
 from mas_scope.core.types import TaskExample
+from mas_scope.llm.base import LLMResponse
 from mas_scope.llm.mock import MockLLM
 from scripts.analyze_allocator_ablation import main as analyze_main
 from scripts.generate_allocator_report import main as report_main
@@ -41,6 +42,20 @@ def _memory(memory_id="m_000001", task="HotpotQA"):
 
 def _write_jsonl(path: Path, rows):
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+class StaticLLM:
+    model_name = "static-llm"
+
+    def __init__(self, content: str):
+        self.content = content
+        self.calls = 0
+        self.last_messages: list[dict] = []
+
+    def generate(self, messages: list[dict], **kwargs) -> LLMResponse:
+        self.calls += 1
+        self.last_messages = messages
+        return LLMResponse(content=self.content, usage={}, raw={})
 
 
 def test_memory_loader_namespaces_duplicate_ids(tmp_path: Path):
@@ -81,6 +96,61 @@ def test_masking_invalid_json_falls_back_to_all_zero():
     assert result["mask_reasons"][0]["reason_tag"] == "allocator_error"
 
 
+def test_masking_compact_mask_string_parses():
+    llm = StaticLLM(
+        json.dumps(
+            {
+                "agent_order": ["actor", "critic"],
+                "decisions": [{"memory_id": "hotpotqa:m1", "mask": "10"}],
+            }
+        )
+    )
+
+    result = generate_mask(llm, _example(), [_memory("hotpotqa:m1")], ["actor", "critic"])
+
+    assert result["mask_matrix"] == [[1, 0]]
+    assert result["agent_score_matrix"] == [[1.0, 0.0]]
+    assert result["mask_reasons"][0]["reason_tag"] == "routed"
+    assert result["errors"] == []
+
+
+def test_masking_legacy_agent_mask_still_parses():
+    llm = StaticLLM(
+        json.dumps(
+            {
+                "agent_order": ["actor", "critic"],
+                "decisions": [{"memory_id": "hotpotqa:m1", "agent_mask": [1, 1]}],
+            }
+        )
+    )
+
+    result = generate_mask(llm, _example(), [_memory("hotpotqa:m1")], ["actor", "critic"])
+
+    assert result["mask_matrix"] == [[1, 1]]
+    assert result["mask_reasons"][0]["reason_tag"] == "broadcast"
+
+
+def test_masking_missing_decision_only_zeroes_missing_memory():
+    llm = StaticLLM(
+        json.dumps(
+            {
+                "agent_order": ["actor", "critic"],
+                "decisions": [{"memory_id": "hotpotqa:m1", "mask": "10"}],
+            }
+        )
+    )
+
+    result = generate_mask(
+        llm,
+        _example(),
+        [_memory("hotpotqa:m1"), _memory("hotpotqa:m2")],
+        ["actor", "critic"],
+    )
+
+    assert result["mask_matrix"] == [[1, 0], [0, 0]]
+    assert "missing_decision:hotpotqa:m2" in result["errors"]
+
+
 def test_selection_enforces_budget_with_fallback():
     memories = [
         {"memory_id": "m1", "retrieval_rank": 1, "retrieval_score": 3},
@@ -91,6 +161,22 @@ def test_selection_enforces_budget_with_fallback():
     result = select_memories(MockLLM(), _example(), memories, ["actor"], [[1], [1], [1]], per_agent_k=2, use_llm=False)
 
     assert result["selected_matrix"] == [[1], [1], [0]]
+
+
+def test_selection_prompt_keeps_sufficient_guidance():
+    llm = StaticLLM(json.dumps({"selections": [{"agent": "actor", "memory_ids": ["m1", "m2"]}]}))
+    select_memories(
+        llm,
+        _example(),
+        [_memory("m1"), _memory("m2")],
+        ["actor"],
+        [[1], [1]],
+        per_agent_k=3,
+    )
+    prompt = "\n".join(message["content"] for message in llm.last_messages)
+
+    assert "select 2 to 3" in prompt
+    assert "not reject most allowed memories again" in prompt
 
 
 def test_allowed_cap_limits_each_agent_by_score():
@@ -120,6 +206,53 @@ def test_realization_invalid_json_falls_back_to_raw():
     assert result["errors"]
     assert result["realized_memories"]["actor"][0]["realization_type"] == "raw"
     assert result["realized_memories"]["actor"][0]["text"] == "Condition: x\nExperience: y"
+
+
+def test_realization_valid_json_overrides_raw_text():
+    memories = [{"memory_id": "m1", "text": "Condition: x\nExperience: y", "retrieval_rank": 1}]
+    llm = StaticLLM(
+        json.dumps(
+            {
+                "realizations": [
+                    {
+                        "agent": "actor",
+                        "memory_id": "m1",
+                        "realization_type": "warning",
+                        "text": "Verify the answer instead of repeating it.",
+                    }
+                ]
+            }
+        )
+    )
+
+    result = realize_memories(llm, _example(), memories, ["actor"], [[1]], use_llm=True)
+
+    assert result["errors"] == []
+    assert result["realized_memories"]["actor"][0]["realization_type"] == "warning"
+    assert result["realized_memories"]["actor"][0]["text"] == "Verify the answer instead of repeating it."
+
+
+def test_realization_prompt_preserves_concrete_checks():
+    llm = StaticLLM(
+        json.dumps(
+            {
+                "realizations": [
+                    {
+                        "agent": "actor",
+                        "memory_id": "m1",
+                        "realization_type": "raw",
+                        "text": "Check entity granularity before finalizing.",
+                    }
+                ]
+            }
+        )
+    )
+    realize_memories(llm, _example(), [{"memory_id": "m1", "text": "Check entity granularity."}], ["actor"], [[1]], use_llm=True)
+    prompt = "\n".join(message["content"] for message in llm.last_messages)
+
+    assert "Preserve concrete checks" in prompt
+    assert "If rewriting would weaken the memory" in prompt
+    assert "Avoid generic rewrites" in prompt
 
 
 def test_diagnostics_computes_expected_rates():
@@ -154,7 +287,7 @@ def test_run_analyze_and_report_smoke(tmp_path: Path):
     _write_jsonl(memory_file, [_memory("m_000001", "HotpotQA")])
     root = tmp_path / "ablation" / "hotpotqa"
 
-    for setting in ("B0", "B1", "B2"):
+    for setting in ("B0", "B1", "B2", "B3", "B4"):
         args = [
             "--target_file",
             str(target_file),
@@ -179,12 +312,37 @@ def test_run_analyze_and_report_smoke(tmp_path: Path):
     b0_record = json.loads((root / "B0" / "allocation_records.jsonl").read_text(encoding="utf-8").splitlines()[0])
     b1_record = json.loads((root / "B1" / "allocation_records.jsonl").read_text(encoding="utf-8").splitlines()[0])
     b2_record = json.loads((root / "B2" / "allocation_records.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    b3_record = json.loads((root / "B3" / "allocation_records.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    b4_record = json.loads((root / "B4" / "allocation_records.jsonl").read_text(encoding="utf-8").splitlines()[0])
 
     assert b0_record["retrieved_memories"] == []
     assert b0_record["allocator_errors"] == []
     assert b1_record["retrieved_memories"][0]["memory_id"] == "hotpotqa:m_000001"
     assert b1_record["mask_matrix"][0] == [1, 1, 1, 1, 1]
+    assert len(b1_record["agent_memory_trace"]) == 5
+    assert b1_record["agent_memory_trace"][0]["memory_id"] == "hotpotqa:m_000001"
+    assert b1_record["agent_memory_trace"][0]["mask_allowed"] is True
+    assert b1_record["agent_memory_trace"][0]["selected"] is True
+    assert b1_record["agent_memory_trace"][0]["injected"] is True
     assert b2_record["mask_matrix"][0] == [0, 0, 0, 0, 0]
+    assert b2_record["agent_memory_trace"][0]["stage_status"] == "rejected_by_mask"
+    assert b2_record["cache_metadata"]["cache_hit"] is True
+    assert b2_record["cache_metadata"]["source_setting"] == "B1"
+    assert b3_record["cache_metadata"]["cache_hit"] is True
+    assert b3_record["cache_metadata"]["source_setting"] == "B2"
+    assert "masking" in b3_record["cache_metadata"]["reused_stages"]
+    assert not any("masking_error" in error for error in b3_record["allocator_errors"])
+    assert b4_record["cache_metadata"]["cache_hit"] is True
+    assert b4_record["cache_metadata"]["source_setting"] == "B3"
+    assert "selection" in b4_record["cache_metadata"]["reused_stages"]
+    assert (root / "B2" / "stage_cache.jsonl").exists()
+    b1_trace = [
+        json.loads(line)
+        for line in (root / "B1" / "agent_memory_trace.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(b1_trace) == 5
+    assert {row["agent"] for row in b1_trace} == set(b1_record["agents"])
 
     run_main(
         [
