@@ -4,6 +4,8 @@ from pathlib import Path
 from mas_scope.llm.base import LLMResponse
 
 from extract_memories import (
+    TrajectoryInput,
+    build_messages,
     load_trajectories,
     parse_json_array,
     run_extraction,
@@ -91,10 +93,152 @@ def test_load_trajectories_enriches_mas_run_artifacts(tmp_path: Path):
     assert "llm_raw" not in payload
 
 
+def test_load_trajectories_compacts_hotpotqa_context_and_team_metadata(tmp_path: Path):
+    input_dir = tmp_path / "run"
+    input_dir.mkdir()
+    (input_dir / "trajectories.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run_hotpot",
+                "example_id": "hotpot_1",
+                "dataset_name": "hotpotqa",
+                "mas_type": "macnet",
+                "messages": [
+                    {
+                        "turn_id": 0,
+                        "agent_name": "actor agent 1",
+                        "role": "actor agent 1",
+                        "content": "Final Answer: United States ambassador to Ghana",
+                        "metadata": {"llm_raw": {"provider": "mock"}},
+                    }
+                ],
+                "metadata": {
+                    "mas_style": "macnet",
+                    "agent_order": ["actor agent 1", "critic agent 1", "summarizer agent"],
+                    "topology": {"critic agent 1": ["actor agent 1"]},
+                    "edges": [{"source": "actor agent 1", "target": "critic agent 1"}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (input_dir / "examples.jsonl").write_text(
+        json.dumps(
+            {
+                "example_id": "hotpot_1",
+                "dataset_name": "hotpotqa",
+                "task_type": "qa",
+                "input": {
+                    "question": "What government position was held by the woman who portrayed Corliss Archer?",
+                    "context": [
+                        ["Kiss and Tell", ["Kiss and Tell starred Shirley Temple as Corliss Archer."]],
+                        [
+                            "Shirley Temple",
+                            [
+                                "Shirley Temple was an actress and diplomat.",
+                                "She served as Chief of Protocol of the United States.",
+                            ],
+                        ],
+                    ],
+                },
+                "target": {
+                    "answer": "Chief of Protocol",
+                    "supporting_facts": [["Kiss and Tell", 0], ["Shirley Temple", 1]],
+                },
+                "metadata": {"question_type": "bridge", "level": "hard", "benchmark_format": "hotpotqa"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (input_dir / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run_hotpot",
+                "example_id": "hotpot_1",
+                "prediction": "United States ambassador to Ghana",
+                "target": {"answer": "Chief of Protocol"},
+                "metrics": {"exact_match": 0.0},
+                "success": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    trajectories = load_trajectories(input_dir)
+
+    payload = json.loads(trajectories[0].content)
+    context_summary = payload["task"]["input"]["context_summary"]
+    assert payload["dataset_name"] == "hotpotqa"
+    assert payload["team_metadata"]["agent_order"] == ["actor agent 1", "critic agent 1", "summarizer agent"]
+    assert payload["team_metadata"]["edges"] == [{"source": "actor agent 1", "target": "critic agent 1"}]
+    assert payload["task"]["metadata"]["question_type"] == "bridge"
+    assert context_summary["num_context_articles"] == 2
+    assert context_summary["supporting_sentences"][1]["sentence"] == "She served as Chief of Protocol of the United States."
+    assert payload["messages"][0]["role"] == "actor agent 1"
+    assert "metadata" not in payload["messages"][0]
+    assert trajectories[0].metadata["success"] is False
+
+
 def test_parse_json_array_accepts_fenced_and_extra_text():
     assert parse_json_array('[{"a": 1}]') == [{"a": 1}]
     assert parse_json_array('```json\n[{"a": 2}]\n```') == [{"a": 2}]
     assert parse_json_array('Here is the array:\n[{"a": 3}]\nDone') == [{"a": 3}]
+
+
+def test_build_messages_uses_hotpotqa_failure_and_multi_agent_instructions():
+    payload = {
+        "trajectory_id": "traj_fail",
+        "example_id": "hotpot_1",
+        "dataset_name": "hotpotqa",
+        "mas_type": "macnet",
+        "task": {
+            "example_id": "hotpot_1",
+            "dataset_name": "hotpotqa",
+            "task_type": "qa",
+            "metadata": {"question_type": "bridge"},
+        },
+        "messages": [
+            {"turn_id": 0, "agent_name": "actor agent 1", "role": "actor agent 1", "content": "wrong"},
+            {"turn_id": 1, "agent_name": "critic agent 1", "role": "critic agent 1", "content": "accept"},
+        ],
+        "team_metadata": {
+            "topology": {"critic agent 1": ["actor agent 1"]},
+            "agent_order": ["actor agent 1", "critic agent 1"],
+        },
+        "result": {
+            "prediction": "wrong",
+            "target": {"answer": "right"},
+            "metrics": {"exact_match": 0.0},
+            "success": False,
+        },
+    }
+
+    messages = build_messages(TrajectoryInput("traj_fail", "run/trajectories.jsonl", json.dumps(payload)), max_chars=60000)
+
+    system_prompt = messages[0]["content"]
+    user_prompt = messages[1]["content"]
+    assert "Failed trajectory focus" in system_prompt
+    assert "HotpotQA-specific extraction focus" in system_prompt
+    assert "Multi-agent extraction focus" in system_prompt
+    assert '"outcome": "failure"' in user_prompt
+    assert '"hotpotqa": true' in user_prompt
+    assert '"agent_order": [' in user_prompt
+
+
+def test_build_messages_uses_success_instruction_for_successful_runs():
+    payload = {
+        "trajectory_id": "traj_success",
+        "dataset_name": "hotpotqa",
+        "result": {"metrics": {"exact_match": 1.0}, "success": True},
+    }
+
+    messages = build_messages(TrajectoryInput("traj_success", "run/trajectories.jsonl", json.dumps(payload)), max_chars=60000)
+
+    assert "Successful trajectory focus" in messages[0]["content"]
+    assert '"outcome": "success"' in messages[1]["content"]
 
 
 def test_run_extraction_writes_whitelisted_memories_and_sequential_ids(tmp_path: Path):
@@ -139,6 +283,62 @@ def test_run_extraction_writes_whitelisted_memories_and_sequential_ids(tmp_path:
     assert "scope" not in lines[0]
     assert "agent_mask" not in lines[0]
     assert "target_agent" not in lines[0]
+
+
+def test_run_extraction_attaches_source_metadata_from_mas_artifacts(tmp_path: Path):
+    input_dir = tmp_path / "run"
+    input_dir.mkdir()
+    (input_dir / "trajectories.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run_hotpot",
+                "example_id": "hotpot_1",
+                "dataset_name": "hotpotqa",
+                "mas_type": "macnet",
+                "messages": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (input_dir / "examples.jsonl").write_text(
+        json.dumps(
+            {
+                "example_id": "hotpot_1",
+                "dataset_name": "hotpotqa",
+                "task_type": "qa",
+                "input": {"question": "Who held the role?"},
+                "target": {"answer": "Chief of Protocol"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (input_dir / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run_hotpot",
+                "example_id": "hotpot_1",
+                "prediction": "ambassador",
+                "target": {"answer": "Chief of Protocol"},
+                "metrics": {"exact_match": 0.0, "token_f1": 0.0},
+                "success": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    llm = FakeLLM([_memory_response(source={"producer_agent": "multi-agent", "producer_role": "team"})])
+    output_file = tmp_path / "memories.jsonl"
+
+    run_extraction(input_dir=input_dir, output_file=output_file, llm=llm, logs_dir=tmp_path / "logs", overwrite=True)
+
+    row = json.loads(output_file.read_text(encoding="utf-8"))
+    assert row["source"]["example_id"] == "hotpot_1"
+    assert row["source"]["dataset_name"] == "hotpotqa"
+    assert row["source"]["mas_type"] == "macnet"
+    assert row["source"]["success"] is False
+    assert row["source"]["metrics"] == {"exact_match": 0.0, "token_f1": 0.0}
 
 
 def test_concrete_agent_team_role_is_normalized(tmp_path: Path):

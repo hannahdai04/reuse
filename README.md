@@ -1,16 +1,17 @@
 # MAS Scope
 
-Phase-1 infrastructure for studying cross-task experience memory reuse scope in LLM-based multi-agent systems.
+Infrastructure for studying cross-task experience memory reuse scope in LLM-based multi-agent systems.
 
 Chinese developer documentation: [docs/CODE_DOCUMENTATION_ZH.md](docs/CODE_DOCUMENTATION_ZH.md).
 
-The current codebase supports a no-memory baseline pipeline:
+The current codebase supports baseline runs, trajectory-to-experience extraction, memory routing, and allocator ablations:
 
 ```text
-DatasetBuilder -> TaskExample -> Task + MAS + LLM + NullMemoryProvider -> Trajectory -> Evaluation -> Run Artifacts
+DatasetBuilder -> TaskExample -> Task + MAS + LLM + MemoryProvider -> Trajectory -> Evaluation -> Run Artifacts
+Run Artifacts -> extract_memories.py -> Experience Memory JSONL -> Retrieval/Masking/Selection/Realization
 ```
 
-No real memory method is implemented. `NullMemoryProvider` is the only memory provider.
+`NullMemoryProvider` remains the baseline. `LLMScopeMemoryProvider` and the allocator modules support controlled memory reuse experiments.
 
 ## Phase-1 Scope
 
@@ -21,15 +22,16 @@ Implemented:
 - MAS backbones: AutoGen-style, MacNet-style, CAMEL-style, DyLAN-style.
 - Mock LLM and optional OpenAI-compatible LLM provider.
 - QA, formal planning, and interactive task classes.
-- No-memory experiment runner.
-- CLI for dataset validation, split listing, and smoke runs.
+- Experiment runner with null-memory and `llm-scope` memory providers.
+- ReasoningBank-style experience extraction from MAS trajectories.
+- Allocator ablation modules for retrieval, masking, selection, realization, diagnostics, and reports.
+- CLI for dataset validation, split listing, smoke runs, and simple memory-bank construction.
 - Real-run config templates for ALFWorld TextWorld and ScienceWorld manifests.
 - JSONL/JSON/YAML run artifacts.
 - Offline pytest suite.
 
 Intentionally not implemented:
 
-- Real memory methods.
 - Learned memory scope.
 - All-shared, all-private, or fixed-role memory.
 - G-Memory, LatentMem, or LEGOMem memory logic.
@@ -90,13 +92,13 @@ data/samples/               Tiny offline sample datasets
 data/real_samples/          Tiny real-file samples and manifests
 src/mas_scope/config/       YAML config schema and loader
 src/mas_scope/core/         Shared schemas, IDs, registries, exceptions
-src/mas_scope/datasets/     Dataset adapters and split-aware builders
+src/mas_scope/datasets/     Split-aware dataset builders
 src/mas_scope/environments/ Environment adapter interfaces and mocks
 src/mas_scope/evaluation/   QA, planning, interactive, aggregate metrics
 src/mas_scope/execution/    No-memory runner and artifact writer
 src/mas_scope/llm/          Base, mock, OpenAI-compatible LLM providers
 src/mas_scope/mas/          In-house MAS framework and backbones
-src/mas_scope/memory/       Memory interface and NullMemoryProvider
+src/mas_scope/memory/       Memory interface, NullMemoryProvider, and llm-scope routing
 src/mas_scope/prompts/      MAS prompt templates
 src/mas_scope/tasks/        QA, formal planning, interactive tasks
 src/mas_scope/tools/        Text/action/PDDL utility helpers
@@ -144,6 +146,18 @@ Run a no-memory smoke baseline:
 
 ```powershell
 python -m mas_scope.cli run --config configs/experiments/smoke_hotpotqa_autogen.yaml
+```
+
+Build a simple message-level memory bank from run artifacts:
+
+```powershell
+python -m mas_scope.cli build-memory-bank --run-dir runs/example_run --output runs/memory_banks/seed.jsonl
+```
+
+Extract ReasoningBank-style experience memories from MAS trajectories:
+
+```powershell
+python extract_memories.py --input_dir runs/example_run --output_file data/memories_hotpotqa.jsonl --overwrite
 ```
 
 Validate environment adapters:
@@ -225,7 +239,23 @@ runs/{timestamp}_{dataset}_{mas}_{safe_model}/
   errors.jsonl
 ```
 
-`trajectories.jsonl` stores raw MAS messages and metadata. These trajectories are not memory; future memory methods can consume them later.
+`trajectories.jsonl` stores raw MAS messages and metadata. `extract_memories.py` can turn these trajectories into reusable experience memories for later allocator and routing experiments.
+
+## Memory Experiments
+
+The repository has two memory paths:
+
+- `src/mas_scope/memory/llm_scope_memory.py`: runtime memory provider that recalls candidates and routes them to agents with fixed or LLM-generated masks.
+- `allocator/`: offline ablation pipeline with retrieval, masking, selection, realization, diagnostics, and report generation.
+
+Useful scripts:
+
+```powershell
+python scripts/run_allocator_ablation.py --help
+python scripts/analyze_allocator_ablation.py --help
+python scripts/generate_allocator_report.py --help
+python scripts/run_manual_memory_debug.py --help
+```
 
 ## Adding A Dataset
 
@@ -243,20 +273,15 @@ runs/{timestamp}_{dataset}_{mas}_{safe_model}/
 4. Maintain `self.agents_list`, `self.topology`, and `self.mas_config`.
 5. Use `MessageGraph` in `run()` and `act()`.
 
-## Future Memory Methods
+## Adding Memory Methods
 
-Future providers should subclass `MemoryProvider`, register with
+Providers should subclass `MemoryProvider`, register with
 `@registry.register_memory_provider("name")`, and implement:
 
 - `retrieve(example, agent_spec, context)`
 - `update(example, trajectory, result)`
 
-Examples that may be added later:
-
-- `AllSharedMemoryProvider`
-- `AllPrivateMemoryProvider`
-- `FixedRoleMemoryProvider`
-- `LearnedScopeMemoryProvider`
+Allocator-style experiments should keep retrieval/allocation records separate from source memories so extracted experiences remain reusable and allocation-free.
 
 They are not implemented in Phase 1.
 
