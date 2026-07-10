@@ -2,13 +2,12 @@
 
 ## 1. Project Overview
 
-This is Phase-1 infrastructure for an LLM-based multi-agent systems project studying cross-task experience memory reuse scope.
+This is infrastructure for an LLM-based multi-agent systems project studying cross-task experience memory reuse scope.
 
-The implemented system can run no-memory MAS baselines over normalized benchmark examples. It includes dataset builders, task classes, LLM providers, MAS backbones, a runner, metrics, and artifact logging.
+The implemented system can run MAS baselines and memory reuse experiments over normalized benchmark examples. It includes dataset builders, task classes, LLM providers, MAS backbones, memory providers, ReasoningBank-style experience extraction, allocator ablation modules, metrics, and artifact logging.
 
 Not implemented:
 
-- Real memory reuse.
 - Learned memory scope.
 - All-shared, all-private, or fixed-role memory.
 - G-Memory, LatentMem, or LEGOMem memory logic.
@@ -22,13 +21,13 @@ Not implemented:
 - `data/real_samples/`: tiny real-file samples and manifests.
 - `src/mas_scope/config/`: pydantic config schema and YAML loader.
 - `src/mas_scope/core/`: shared schemas, registry, IDs, exceptions.
-- `src/mas_scope/datasets/`: legacy adapters plus split-aware builders.
+- `src/mas_scope/datasets/`: split-aware builders.
 - `src/mas_scope/environments/`: environment adapter interface, mocks, optional real ALFWorld/ScienceWorld adapters.
 - `src/mas_scope/evaluation/`: metrics for QA, planning, interactive tasks, and aggregation.
 - `src/mas_scope/execution/`: experiment runner and artifact writer.
 - `src/mas_scope/llm/`: base LLM interface, mock provider, OpenAI-compatible provider.
 - `src/mas_scope/mas/`: MAS agent class, base interface, and four MAS backbones.
-- `src/mas_scope/memory/`: memory interface and no-op provider.
+- `src/mas_scope/memory/`: memory interface, no-op provider, and LLM-scope routing provider.
 - `src/mas_scope/prompts/`: centralized prompt templates.
 - `src/mas_scope/tasks/`: task classes for QA, formal planning, and interactive episodes.
 - `src/mas_scope/tools/`: normalization, action parsing, and PDDL format helpers.
@@ -40,7 +39,7 @@ Not implemented:
 Raw Dataset / Env Metadata
         |
         v
-DatasetAdapter / DatasetBuilder
+DatasetBuilder
         |
         v
 TaskExample
@@ -58,8 +57,6 @@ Evaluation
 Run Artifacts
 ```
 
-The current runner uses `DatasetBuilder`, not the older `BaseDatasetAdapter`, for no-memory baseline experiments.
-
 ## 4. Core Schemas
 
 All shared schemas live in `mas_scope.core.types`.
@@ -74,23 +71,11 @@ All shared schemas live in `mas_scope.core.types`.
 - `TaskResult`: per-example prediction, target, metrics, success, cost, and error.
 - `MessageGraph`: lightweight graph with state, messages, edges, action, and metadata.
 
-Compatibility modules such as `datasets/schema.py`, `mas/messages.py`, and `environments/schema.py` re-export these schemas.
+Import these schemas directly from `mas_scope.core.types`.
 
-## 5. Dataset Adapters And Builders
+## 5. Dataset Builders
 
-`BaseDatasetAdapter` is a legacy parser interface with:
-
-- `load(split, limit)`
-- `validate_raw(example)`
-- `normalize(raw, split)`
-
-Existing adapters:
-
-- `HotpotQAAdapter`
-- `StrategyQAAdapter`
-- `PDDLAdapter`
-
-The no-memory baseline path uses `DatasetBuilder` in `datasets/builders.py`:
+The experiment path uses `DatasetBuilder` in `datasets/builders.py`:
 
 - `build(split, limit) -> list[TaskExample]`
 - `available_splits() -> list[str]`
@@ -216,10 +201,14 @@ MAS classes do not import model SDKs, torch, transformers, or external MAS frame
 - `retrieve()` returns `[]`
 - `update()` does nothing
 
+`LLMScopeMemoryProvider`:
+
+- loads memory JSONL banks.
+- recalls candidates and routes memories to agents with all-agents, source-role-match, assistant-only, or LLM-mask policies.
+- keeps allocation decisions separate from extracted source memories.
+
 Memory providers are registered through `registry.register_memory_provider(...)`.
-Phase 1 registers only `"null"`, which resolves to `NullMemoryProvider`. The
-runner creates memory through `registry.get_memory_provider(config.memory.provider)`.
-This preserves the future extension point without implementing memory logic.
+The runner creates memory through `registry.get_memory_provider(config.memory.provider)`.
 
 ## 11. Runner And Artifacts
 
@@ -400,7 +389,7 @@ All tests run offline with `MockLLM`.
 
 ## 20. Design Constraints
 
-- Dataset builders and adapters must not call LLMs.
+- Dataset builders must not call LLMs.
 - Evaluation must not depend on MAS internals.
 - MAS must not parse raw dataset formats.
 - Environment adapters must expose `reset` and `step`.
@@ -408,8 +397,7 @@ All tests run offline with `MockLLM`.
 - `MAS.act(...)` only decides the next action.
 - Tests must work offline.
 - `MemoryProvider` must stay in runner signatures.
-- Phase 1 must not implement real memory logic.
-- Runner currently supports only the registered `null` memory provider.
+- Extracted source memories must stay allocation-free; routing and realization belong to memory providers or allocator scripts.
 
 ## 21. Phase-1 Completion Checklist
 
@@ -427,7 +415,8 @@ The current codebase satisfies:
 - Dataset builders produce `TaskExample` objects.
 - Mock environments support `reset` and `step`.
 - `NullMemoryProvider` is registered and used.
-- No real memory method is implemented.
+- `LLMScopeMemoryProvider` is registered for controlled reuse experiments.
+- ReasoningBank-style memory extraction and allocator ablation scripts are available.
 - Real ALFWorld and ScienceWorld imports are optional.
 - Tests do not require external APIs or heavy environment dependencies.
 

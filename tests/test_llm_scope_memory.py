@@ -70,6 +70,55 @@ def test_deterministic_agent_mask_modes(tmp_path):
     assert assistant_only.retrieve(example, proxy_spec, proxy_context) == []
 
 
+def test_reasoningbank_schema_memory_is_recalled_and_role_routed(tmp_path):
+    bank_path = tmp_path / "reasoningbank.jsonl"
+    _write_memory_bank(
+        bank_path,
+        [
+            {
+                "memory_id": "rb-critic",
+                "source": {
+                    "trajectory_id": "seed",
+                    "query": "A different HotpotQA question",
+                    "dataset_name": "hotpotqa",
+                },
+                "reasoningbank": {"induction_type": "failure", "attributed_agent_role": "critic"},
+                "condition": "When a HotpotQA answer may stop at an intermediate bridge entity.",
+                "experience": "Critics should verify that the final answer matches the asked property.",
+                "evidence": "The critic failed to reject an answer that matched evidence but not the question.",
+            },
+            {
+                "memory_id": "rb-team",
+                "source": {
+                    "trajectory_id": "seed_team",
+                    "query": "Another different HotpotQA question",
+                    "dataset_name": "hotpotqa",
+                },
+                "reasoningbank": {"induction_type": "success", "attributed_agent_role": "team"},
+                "condition": "When actor and critic outputs agree after evidence checks.",
+                "experience": "The summarizer can use consensus after verified evidence alignment.",
+                "evidence": "The team succeeded after both critics checked the actors' evidence.",
+            },
+        ],
+    )
+    example = registry.get_dataset_builder("hotpotqa")("data/samples/hotpotqa_sample.json").build("dev", limit=1)[0]
+    provider = LLMScopeMemoryProvider(bank_path=bank_path, policy_mode="source-role-match", candidate_top_k=5, selected_top_k=5)
+
+    critic_memories = provider.retrieve(
+        example,
+        AgentSpec(name="critic agent 1", role="critic agent 1", system_prompt=""),
+        {"agent_order": ["actor agent 1", "critic agent 1", "summarizer agent"], "current_agent": "critic agent 1"},
+    )
+    summarizer_memories = provider.retrieve(
+        example,
+        AgentSpec(name="summarizer agent", role="summarizer agent", system_prompt=""),
+        {"agent_order": ["actor agent 1", "critic agent 1", "summarizer agent"], "current_agent": "summarizer agent"},
+    )
+
+    assert {memory["memory_id"] for memory in critic_memories} == {"rb-critic", "rb-team"}
+    assert [memory["memory_id"] for memory in summarizer_memories] == ["rb-team"]
+
+
 def test_llm_mask_invalid_json_falls_back_to_empty(tmp_path):
     bank_path = tmp_path / "bank.jsonl"
     _write_memory_bank(bank_path, [_memory_record()])
@@ -88,6 +137,39 @@ def test_llm_mask_invalid_json_falls_back_to_empty(tmp_path):
 
     assert memories == []
     assert provider.last_retrieval_metadata["errors"]
+
+
+def test_llm_mask_accepts_compact_memory_mask(tmp_path):
+    bank_path = tmp_path / "bank.jsonl"
+    _write_memory_bank(bank_path, [_memory_record("m1"), _memory_record("m2")])
+    example = registry.get_dataset_builder("hotpotqa")("data/samples/hotpotqa_sample.json").build("dev", limit=1)[0]
+    provider = LLMScopeMemoryProvider(
+        bank_path=bank_path,
+        policy_mode="llm-mask",
+        policy_llm={"provider": "mock", "model": "mock-llm"},
+    )
+    provider._policy_llm = type(
+        "MaskLLM",
+        (),
+        {
+            "generate": lambda self, messages, **kwargs: type("Response", (), {"content": json.dumps({"memory_mask": [1, 0]})})()
+        },
+    )()
+
+    memories = provider.retrieve(
+        example,
+        AgentSpec(name="assistant agent", role="assistant agent", system_prompt=""),
+        {"agent_order": ["assistant agent", "user proxy agent"], "current_agent": "assistant agent"},
+    )
+
+    assert [memory["memory_id"] for memory in memories] == ["m1"]
+    assert provider.last_retrieval_metadata["policy_prompt_chars"] > 0
+    assert provider.last_retrieval_metadata["policy_candidate_count"] == 2
+    prompt = provider._policy_user_prompt(example, provider.memories, ["assistant agent", "user proxy agent"], {})
+    assert "memory_mask" in prompt
+    assert "agent_mask" not in prompt
+    assert "reason" not in prompt
+    assert "policy" not in prompt
 
 
 def test_build_memory_bank_from_run_artifacts(tmp_path):

@@ -88,6 +88,48 @@ def test_retrieval_is_deterministic(tmp_path: Path):
     assert [item["retrieval_rank"] for item in first] == [1, 2]
 
 
+def test_bm25_retrieval_supports_reasoningbank_schema_and_filters_same_query(tmp_path: Path):
+    memory_file = tmp_path / "hotpotqa_reasoningbank.jsonl"
+    same_query = "Where is the Eiffel Tower?"
+    _write_jsonl(
+        memory_file,
+        [
+            {
+                "memory_id": "same-source",
+                "source": {"trajectory_id": "seed_same", "query": same_query, "dataset_name": "hotpotqa"},
+                "reasoningbank": {"induction_type": "success", "attributed_agent_role": "actor"},
+                "condition": "When locating a landmark.",
+                "experience": "Use the source sentence to answer.",
+                "evidence": "The source query is identical and should be filtered.",
+            },
+            {
+                "memory_id": "bridge-check",
+                "source": {"trajectory_id": "seed_bridge", "query": "A different bridge question", "dataset_name": "hotpotqa"},
+                "reasoningbank": {"induction_type": "failure", "attributed_agent_role": "critic"},
+                "condition": "When a HotpotQA bridge question asks for the final entity property.",
+                "experience": "Verify that the answer is the requested final property, not the intermediate bridge entity.",
+                "evidence": "A critic failed to catch an intermediate bridge entity answer.",
+            },
+            {
+                "memory_id": "generic",
+                "source": {"trajectory_id": "seed_generic", "query": "A different generic question", "dataset_name": "hotpotqa"},
+                "reasoningbank": {"induction_type": "success", "attributed_agent_role": "team"},
+                "condition": "When solving a task.",
+                "experience": "Collaborate carefully.",
+                "evidence": "The team worked together.",
+            },
+        ],
+    )
+    memories = load_memories([memory_file])
+
+    retrieved = retrieve_top_k(_example(), memories, top_k=3)
+
+    assert "hotpotqa:same-source" not in [memory["memory_id"] for memory in retrieved]
+    assert retrieved[0]["memory_id"] == "hotpotqa:bridge-check"
+    assert retrieved[0]["retrieval_score"] > retrieved[1]["retrieval_score"]
+    assert "same_dataset" in retrieved[0]["retrieval_reason"]
+
+
 def test_masking_invalid_json_falls_back_to_all_zero():
     result = generate_mask(MockLLM(), _example(), [_memory("hotpotqa:m1")], ["actor", "critic"])
 
