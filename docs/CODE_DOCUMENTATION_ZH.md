@@ -132,3 +132,142 @@ python -m pytest
 ```
 
 清理旧适配器层后，数据集构造的唯一主路径是 `DatasetBuilder`，共享类型的唯一主路径是 `mas_scope.core.types`。
+
+## 9. 常用命令
+
+安装开发依赖：
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+验证数据集：
+
+```powershell
+python -m mas_scope.cli validate-data --builder hotpotqa --data-path data/samples/hotpotqa_sample.json --split dev --limit 2
+python -m mas_scope.cli validate-data --builder strategyqa --data-path data/samples/strategyqa_sample.json --split dev --limit 2
+python -m mas_scope.cli validate-data --builder pddl --data-path data/samples/pddl_sample.jsonl --split test --limit 1
+```
+
+运行一个无记忆 smoke baseline：
+
+```powershell
+python -m mas_scope.cli run --config configs/experiments/smoke_hotpotqa_autogen.yaml
+```
+
+从 run artifacts 构造旧式逐消息 memory bank：
+
+```powershell
+python -m mas_scope.cli build-memory-bank --run-dir runs/example_run --output runs/memory_banks/seed.jsonl
+```
+
+这条路径主要用于调试或兼容旧实验；主线建议使用 ReasoningBank-style memory。
+
+## 10. ReasoningBank-style Memory 抽取
+
+主抽取入口是根目录的 `extract_memories.py`。输入应优先使用一次 MAS run 目录：
+
+```text
+runs/example_run/
+  examples.jsonl
+  trajectories.jsonl
+  results.jsonl
+```
+
+运行命令：
+
+```powershell
+python extract_memories.py `
+  --input_dir runs/example_run `
+  --output_file data/memories_hotpotqa_reasoningbank.jsonl `
+  --model Qwen/Qwen3-8B `
+  --overwrite
+```
+
+抽取结果是 JSONL，每行一条 memory：
+
+```json
+{
+  "memory_id": "m_000001",
+  "source": {
+    "trajectory_id": "trajectory_id",
+    "example_id": "hotpotqa_example_id",
+    "dataset_name": "hotpotqa",
+    "mas_type": "macnet",
+    "producer_agent": "multi-agent",
+    "producer_role": "team",
+    "success": false
+  },
+  "source_task_description": "source task or local situation",
+  "condition": "when this memory applies",
+  "experience": "reusable lesson, warning, or strategy",
+  "evidence": "trajectory behavior or result supporting the memory"
+}
+```
+
+抽取阶段只负责提炼经验，不决定未来分配给哪个 agent。因此 memory 中不应包含：
+
+- `agent_mask`
+- `target_agent`
+- `scope`
+- `allocation_score`
+
+这些字段属于 allocator 或 runtime memory provider 的职责。
+
+## 11. HotpotQA + Multi-agent 适配点
+
+HotpotQA 抽取会额外关注：
+
+- bridge entity 是否停在中间实体。
+- comparison 问题是否比较错对象或错属性。
+- final answer 是否满足最小 supported span/entity。
+- yes/no 问题是否有 evidence support。
+- critic 是否真正验证 actor 输出。
+- summarizer 是否正确仲裁多个候选答案。
+
+Multi-agent provenance 会保留：
+
+- `agent_name`
+- `role`
+- `turn_id`
+- `agent_order`
+- `topology`
+- `edges`
+
+团队协作经验使用：
+
+```json
+{"producer_agent": "multi-agent", "producer_role": "team"}
+```
+
+单个 agent 行为经验使用该 agent 的具体 role，例如：
+
+```json
+{"producer_agent": "critic agent 1", "producer_role": "critic agent 1"}
+```
+
+## 12. 目录清理约定
+
+源码和测试应提交到 git。以下目录默认是本地运行产物，已经在 `.gitignore` 中忽略：
+
+- `runs/`：实验运行轨迹、结果、metrics。
+- `outputs/`：allocator ablation 输出、diagnostics、reports。
+- `logs/`：抽取失败响应和调试日志。
+- `.tmp/`：临时实验输入输出。
+- `.pytest_cache/`、`__pycache__/`：测试和 Python 缓存。
+
+安全清理对象：
+
+- `.pytest_cache/`
+- `__pycache__/`
+- 空的 `.tmp/`
+- 明确无用的 stdout/stderr 临时文件
+
+不建议直接删除：
+
+- `runs/`
+- `outputs/`
+- `logs/`
+- `.env`
+
+这些文件可能用于复现实验、追踪失败样本或保存本地 API 配置。

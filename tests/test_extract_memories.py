@@ -35,7 +35,10 @@ def _memory_response(**overrides):
             "producer_agent": "planner",
             "producer_role": "planner",
         },
-        "source_task_description": "A source task where agents decomposed a question.",
+        "reasoningbank": {
+            "induction_type": "success",
+            "attributed_agent_role": "planner",
+        },
         "condition": "When a future task requires decomposing a broad objective into checkable subtasks.",
         "experience": "Split the objective into independent subtasks before asking critics to verify the result.",
         "evidence": "The trajectory succeeded after the planner separated the work and the critic checked each part.",
@@ -220,10 +223,17 @@ def test_build_messages_uses_hotpotqa_failure_and_multi_agent_instructions():
 
     system_prompt = messages[0]["content"]
     user_prompt = messages[1]["content"]
-    assert "Failed trajectory focus" in system_prompt
-    assert "HotpotQA-specific extraction focus" in system_prompt
-    assert "Multi-agent extraction focus" in system_prompt
+    assert "## Guidelines" in system_prompt
+    assert "## Important notes" in system_prompt
+    assert "## Output Format" in system_prompt
+    assert "failed trajectory" in system_prompt
+    assert "## HotpotQA notes" in system_prompt
+    assert "## MAS attribution notes" in system_prompt
+    assert "attributed_agent_role" in system_prompt
+    assert "evidence alignment" in system_prompt
+    assert "what the agent did/failed to do" in system_prompt
     assert '"outcome": "failure"' in user_prompt
+    assert '"induction_type": "failure"' in user_prompt
     assert '"hotpotqa": true' in user_prompt
     assert '"agent_order": [' in user_prompt
 
@@ -237,8 +247,14 @@ def test_build_messages_uses_success_instruction_for_successful_runs():
 
     messages = build_messages(TrajectoryInput("traj_success", "run/trajectories.jsonl", json.dumps(payload)), max_chars=60000)
 
-    assert "Successful trajectory focus" in messages[0]["content"]
+    assert "successful trajectory" in messages[0]["content"]
+    assert "## Guidelines" in messages[0]["content"]
+    assert "## Important notes" in messages[0]["content"]
+    assert "## MAS attribution notes" in messages[0]["content"]
+    assert "attributed_agent_role" in messages[0]["content"]
+    assert "ReasoningBank-style reusable memory items" in messages[0]["content"]
     assert '"outcome": "success"' in messages[1]["content"]
+    assert '"induction_type": "success"' in messages[1]["content"]
 
 
 def test_run_extraction_writes_whitelisted_memories_and_sequential_ids(tmp_path: Path):
@@ -271,14 +287,17 @@ def test_run_extraction_writes_whitelisted_memories_and_sequential_ids(tmp_path:
     assert len(llm.calls) == 2
     assert [line["memory_id"] for line in lines] == ["m_000001", "m_000002"]
     assert lines[0]["source"]["trajectory_id"] == "traj_a"
-    assert lines[1]["source"]["producer_agent"] == "multi-agent"
     assert set(lines[0]) == {
         "memory_id",
         "source",
-        "source_task_description",
+        "reasoningbank",
         "condition",
         "experience",
         "evidence",
+    }
+    assert lines[0]["reasoningbank"] == {
+        "induction_type": "success",
+        "attributed_agent_role": "planner",
     }
     assert "scope" not in lines[0]
     assert "agent_mask" not in lines[0]
@@ -334,18 +353,24 @@ def test_run_extraction_attaches_source_metadata_from_mas_artifacts(tmp_path: Pa
     run_extraction(input_dir=input_dir, output_file=output_file, llm=llm, logs_dir=tmp_path / "logs", overwrite=True)
 
     row = json.loads(output_file.read_text(encoding="utf-8"))
-    assert row["source"]["example_id"] == "hotpot_1"
+    assert row["source"]["trajectory_id"] == "run_hotpot"
+    assert row["source"]["query"] == "Who held the role?"
     assert row["source"]["dataset_name"] == "hotpotqa"
-    assert row["source"]["mas_type"] == "macnet"
-    assert row["source"]["success"] is False
-    assert row["source"]["metrics"] == {"exact_match": 0.0, "token_f1": 0.0}
+    assert row["reasoningbank"]["induction_type"] == "failure"
 
 
 def test_concrete_agent_team_role_is_normalized(tmp_path: Path):
     input_dir = tmp_path / "trajectories"
     input_dir.mkdir()
     (input_dir / "one.txt").write_text("trajectory", encoding="utf-8")
-    llm = FakeLLM([_memory_response(source={"producer_agent": "summarizer agent", "producer_role": "team"})])
+    llm = FakeLLM(
+        [
+            _memory_response(
+                source={"producer_agent": "summarizer agent", "producer_role": "team"},
+                reasoningbank={},
+            )
+        ]
+    )
     output_file = tmp_path / "memories.jsonl"
 
     run_extraction(
@@ -357,8 +382,33 @@ def test_concrete_agent_team_role_is_normalized(tmp_path: Path):
     )
 
     row = json.loads(output_file.read_text(encoding="utf-8"))
-    assert row["source"]["producer_agent"] == "summarizer agent"
-    assert row["source"]["producer_role"] == "summarizer agent"
+    assert row["reasoningbank"]["attributed_agent_role"] == "summarizer agent"
+
+
+def test_team_level_reasoningbank_attribution_is_inferred(tmp_path: Path):
+    input_dir = tmp_path / "trajectories"
+    input_dir.mkdir()
+    (input_dir / "one.txt").write_text("trajectory", encoding="utf-8")
+    llm = FakeLLM(
+        [
+            _memory_response(
+                source={"producer_agent": "multi-agent", "producer_role": "team"},
+                reasoningbank={},
+            )
+        ]
+    )
+    output_file = tmp_path / "memories.jsonl"
+
+    run_extraction(
+        input_dir=input_dir,
+        output_file=output_file,
+        llm=llm,
+        logs_dir=tmp_path / "logs",
+        overwrite=True,
+    )
+
+    row = json.loads(output_file.read_text(encoding="utf-8"))
+    assert row["reasoningbank"]["attributed_agent_role"] == "team"
 
 
 def test_failed_response_is_logged_and_processing_continues(tmp_path: Path):

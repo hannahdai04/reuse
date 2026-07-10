@@ -17,25 +17,73 @@ if REPO_SRC.exists():
 
 from mas_scope.llm.openai_compatible import OpenAICompatibleLLM  # noqa: E402
 
-
-FORBIDDEN_FIELDS = {
-    "applicable_roles",
-    "memory_type",
-    "scope",
-    "initial_scope",
-    "mask",
-    "agent_mask",
-    "allocation_score",
-    "target_agent",
-    "target_role",
-}
-
 REQUIRED_OUTPUT_FIELDS = {
-    "source_task_description",
     "condition",
     "experience",
     "evidence",
 }
+
+
+BASE_HOTPOTQA_MAS_MEMORY_INDUCTION = """You are an expert in HotpotQA multi-agent reasoning.
+Given a HotpotQA MAS trajectory, extract ReasoningBank-style reusable memory items.
+A memory item is transferable process guidance, not a source-task fact, answer, or trajectory summary.
+"""
+
+
+SUCCESSFUL_HOTPOTQA_MAS_MEMORY_INDUCTION = """## Guidelines
+Extract memories from a successful trajectory: what made the MAS solve the task correctly, and what future MAS runs should repeat.
+
+## Important notes
+  - First think why the trajectory succeeded; do not output that analysis.
+  - Extract at most 3 non-overlapping memory items.
+  - Prefer concrete procedures over abstract principles.
+  - Do not copy source entities, question text, answers, or evidence sentences.
+"""
+
+
+FAILED_HOTPOTQA_MAS_MEMORY_INDUCTION = """## Guidelines
+Extract memories from a failed trajectory: why the MAS failed, and what future MAS runs should do to prevent the same failure.
+
+## Important notes
+  - First compare prediction, target, metrics, and agent messages; do not output that analysis.
+  - Extract at most 3 non-overlapping memory items.
+  - Prefer concrete recovery or prevention procedures over abstract principles.
+  - Do not copy source entities, question text, answers, or evidence sentences.
+"""
+
+
+PARALLEL_HOTPOTQA_MAS_MEMORY_INDUCTION = """## Guidelines
+Compare multiple HotpotQA MAS trajectories and extract strategies that separate successful runs from failed ones.
+
+## Important notes
+  - First contrast success and failure patterns; do not output that analysis.
+  - Extract at most 5 non-overlapping memory items.
+  - Prefer transferable reasoning, verification, and coordination procedures.
+"""
+
+
+UNKNOWN_HOTPOTQA_MAS_MEMORY_INDUCTION = """## Guidelines
+Extract only directly supported reasoning, verification, or coordination lessons.
+
+## Important notes
+  - Do not invent success or failure causes.
+  - Extract at most 3 non-overlapping memory items.
+  - Prefer concrete procedures over abstract principles.
+"""
+
+
+HOTPOTQA_EXTRACTION_RULES = """## HotpotQA notes
+  - Focus on bridge reasoning, comparison direction, answer type, evidence alignment, and answer granularity.
+  - Use evidence alignment only as process evidence; do not store task facts or answers.
+"""
+
+
+MAS_EXTRACTION_RULES = """## MAS attribution notes
+  - If one agent mainly caused the success/failure pattern, set attributed_agent_role to that agent role, such as actor, critic, summarizer, planner, solver, or verifier.
+  - If the pattern is about collaboration, handoff, consensus, or aggregation, set attributed_agent_role="team".
+  - In evidence, state what the agent did/failed to do, or what team interaction helped/hurt.
+  - Do not choose future recipients; routing belongs to the downstream allocator.
+"""
 
 
 @dataclass(frozen=True)
@@ -297,11 +345,28 @@ def _trajectory_metadata(payload: Any) -> dict[str, Any]:
     return {
         "example_id": payload.get("example_id") or task.get("example_id"),
         "dataset_name": payload.get("dataset_name") or task.get("dataset_name"),
+        "task_type": task.get("task_type"),
+        "query": _extract_query(payload),
         "mas_type": payload.get("mas_type"),
         "success": _infer_success(payload),
         "metrics": metrics,
         "agent_order": team_metadata.get("agent_order"),
     }
+
+
+def _extract_query(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    task_input = task.get("input") if isinstance(task.get("input"), dict) else {}
+    for container in (task_input, task, payload):
+        if not isinstance(container, dict):
+            continue
+        for key in ("query", "question", "task_description", "objective"):
+            value = _clean_text(container.get(key))
+            if value:
+                return value
+    return None
 
 
 def _infer_success(payload: Any) -> bool | None:
@@ -438,12 +503,14 @@ def _prompt_profile(trajectory: TrajectoryInput, payload: Any) -> dict[str, Any]
     result = payload.get("result") if isinstance(payload, dict) and isinstance(payload.get("result"), dict) else {}
     task = payload.get("task") if isinstance(payload, dict) and isinstance(payload.get("task"), dict) else {}
     task_metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    induction_type = "success" if success is True else "failure" if success is False else "unknown"
     return {
         "dataset_name": dataset_name or None,
         "task_type": task.get("task_type"),
         "example_id": metadata.get("example_id"),
         "mas_type": metadata.get("mas_type"),
-        "outcome": "success" if success is True else "failure" if success is False else "unknown",
+        "outcome": induction_type,
+        "induction_type": induction_type,
         "metrics": metadata.get("metrics") or result.get("metrics") or {},
         "prediction": result.get("prediction"),
         "target": result.get("target"),
@@ -470,66 +537,50 @@ def _agent_order_from_messages(messages: Any) -> list[str]:
 
 
 def _system_prompt(profile: dict[str, Any]) -> str:
-    outcome = profile.get("outcome")
-    if outcome == "success":
-        outcome_rules = """Successful trajectory focus:
-- Distill process rules that helped the agents reach the correct answer.
-- Extract verification, decomposition, aggregation, or format checks that should transfer to future tasks.
-- If the trajectory succeeded while exposing a process weakness, record both the success and the weakness in evidence."""
-    elif outcome == "failure":
-        outcome_rules = """Failed trajectory focus:
-- Compare the prediction, final answer, gold target, metrics, and agent messages to isolate what went wrong.
-- Extract prevention rules that would help future agents avoid the same reasoning, evidence, coordination, or answer-format failure.
-- Prefer concrete warnings over generic advice; state what should be checked or changed."""
+    induction_type = str(profile.get("induction_type") or profile.get("outcome") or "unknown")
+    if induction_type == "success":
+        induction_rules = SUCCESSFUL_HOTPOTQA_MAS_MEMORY_INDUCTION
+        max_memories = 3
+    elif induction_type == "failure":
+        induction_rules = FAILED_HOTPOTQA_MAS_MEMORY_INDUCTION
+        max_memories = 3
+    elif induction_type == "parallel":
+        induction_rules = PARALLEL_HOTPOTQA_MAS_MEMORY_INDUCTION
+        max_memories = 5
     else:
-        outcome_rules = """Unknown-outcome trajectory focus:
-- Extract only lessons supported directly by messages, corrections, or observable coordination patterns.
-- Do not invent success or failure causes when the outcome is absent."""
+        induction_rules = UNKNOWN_HOTPOTQA_MAS_MEMORY_INDUCTION
+        max_memories = 3
 
-    hotpotqa_rules = ""
-    if profile.get("hotpotqa"):
-        hotpotqa_rules = """
-HotpotQA-specific extraction focus:
-- Look for bridge-entity mistakes where an agent stops at the intermediate entity instead of the requested property.
-- Look for comparison mistakes, answer-type mismatch, unsupported yes/no shortcuts, and wrong answer granularity.
-- Use supporting evidence alignment as process evidence, but do not store source-task facts or final answers as reusable memory.
-- Prefer experiences about connecting evidence pieces, checking the asked attribute, and preserving the minimal supported answer span."""
+    domain_rules = HOTPOTQA_EXTRACTION_RULES if profile.get("hotpotqa") else ""
+    multi_agent_rules = MAS_EXTRACTION_RULES
 
-    multi_agent_rules = ""
-    if profile.get("multi_agent"):
-        multi_agent_rules = """
-Multi-agent extraction focus:
-- Preserve provenance: use a concrete producer_agent/producer_role for one agent's behavior, or multi-agent/team for coordination failures and successes.
-- Prefer lessons about actor reasoning, critic verification, summarizer arbitration, handoff quality, consensus failure, and role responsibility.
-- Do not decide future recipients here; allocation belongs to the downstream memory router."""
-
-    return f"""You extract ReasoningBank-style reusable experience memories from task trajectories.
-
-Return only a valid JSON array. Do not wrap it in Markdown.
-Each array item must follow this exact schema:
+    return f"""{BASE_HOTPOTQA_MAS_MEMORY_INDUCTION}
+{induction_rules}
+{domain_rules}{multi_agent_rules}
+## Output Format
+Return only a valid JSON array. Each item must follow this schema:
 {{
   "source": {{
-    "producer_agent": "agent name or multi-agent or unknown",
-    "producer_role": "agent role or team or unknown"
+    "trajectory_id": "...",
+    "query": "...",
+    "dataset_name": "hotpotqa"
   }},
-  "source_task_description": "The source task, subtask, or local situation where this experience was observed.",
-  "condition": "When this experience may be applicable in future tasks.",
-  "experience": "A reusable lesson, strategy, warning, or heuristic distilled from the trajectory.",
-  "evidence": "The key source behavior, outcome, failure, correction, or feedback that supports this experience."
+  "reasoningbank": {{
+    "induction_type": "{induction_type}",
+    "attributed_agent_role": "actor or critic or summarizer or planner or team or unknown"
+  }},
+  "condition": "when this memory applies",
+  "experience": "reusable lesson or procedure",
+  "evidence": "source behavior/outcome supporting the memory"
 }}
 
-Rules:
-- Extract 0 to 3 memories for this trajectory.
-- Extract only reusable experience that can help future agent decisions.
-- Prefer multi-agent execution lessons: decomposition, role responsibility, coordination, handoff, critique, tool-use, aggregation, communication, failure correction.
-- Do not output ordinary facts, final answers, complete trajectory summaries, or task-specific answers.
-- source.producer_agent and source.producer_role are provenance only. They describe where the experience came from, not who should receive it in the future.
-- If the experience is about team coordination rather than one agent, use producer_agent="multi-agent" and producer_role="team".
-- If producer_agent is a concrete agent, producer_role must be that agent's source role, not "team".
-- If the source cannot be determined, use producer_agent="unknown" and producer_role="unknown".
-- If a trajectory succeeds but exposes a process weakness, state both the success and the process weakness in evidence.
-- Do not include future allocation fields such as applicable_roles, memory_type, scope, initial_scope, mask, agent_mask, allocation_score, target_agent, or target_role.
-{outcome_rules}{hotpotqa_rules}{multi_agent_rules}
+## Final constraints
+  - Extract 0 to {max_memories} memory items for this induction input.
+  - Extract only reusable process experience, never task facts or final answers.
+  - source fields are provenance only; they will be completed from the trajectory.
+  - Set reasoningbank.induction_type to "{induction_type}".
+  - Set reasoningbank.attributed_agent_role to a concrete agent role when one agent is responsible; use "team" for team-level memories.
+  - Do not include allocation fields such as agent_mask, target_agent, allocation_score, or applicable_roles.
 """
 
 
@@ -600,17 +651,11 @@ def sanitize_memory(item: Any, trajectory: TrajectoryInput, memory_index: int) -
     if producer_agent not in {"multi-agent", "unknown"} and producer_role == "team":
         producer_role = producer_agent
 
-    source_payload = {
-        "trajectory_id": trajectory.trajectory_id,
-        "producer_agent": producer_agent,
-        "producer_role": producer_role,
-    }
-    source_payload.update(_source_metadata(trajectory))
+    source_payload, source_success = _source_context(trajectory)
 
     sanitized = {
         "memory_id": f"m_{memory_index:06d}",
         "source": source_payload,
-        "source_task_description": _clean_text(item.get("source_task_description")),
         "condition": _clean_text(item.get("condition")),
         "experience": _clean_text(item.get("experience")),
         "evidence": _clean_text(item.get("evidence")),
@@ -618,23 +663,51 @@ def sanitize_memory(item: Any, trajectory: TrajectoryInput, memory_index: int) -
 
     if any(not sanitized[field] for field in REQUIRED_OUTPUT_FIELDS):
         return None
+
+    reasoningbank = _sanitize_reasoningbank(item.get("reasoningbank"), source_success, producer_role, producer_agent)
+    if reasoningbank:
+        sanitized["reasoningbank"] = reasoningbank
     return sanitized
 
 
-def _source_metadata(trajectory: TrajectoryInput) -> dict[str, Any]:
+def _sanitize_reasoningbank(
+    value: Any,
+    source_success: bool | None,
+    producer_role: str = "unknown",
+    producer_agent: str = "unknown",
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    induction_type = _clean_text(value.get("induction_type"))
+    if source_success is True:
+        induction_type = "success"
+    elif source_success is False:
+        induction_type = "failure"
+    elif induction_type not in {"success", "failure", "parallel", "unknown"}:
+        induction_type = "unknown"
+    attributed_agent_role = _clean_text(value.get("attributed_agent_role"))
+    if not attributed_agent_role:
+        attributed_agent_role = producer_role or producer_agent or "unknown"
+    if attributed_agent_role.lower() in {"multi-agent", "team-level"} or producer_agent == "multi-agent" or producer_role == "team":
+        attributed_agent_role = "team"
+    reasoningbank = {
+        "induction_type": induction_type,
+        "attributed_agent_role": attributed_agent_role,
+    }
+    return {key: item for key, item in reasoningbank.items() if item not in (None, "", [], {})}
+
+
+def _source_context(trajectory: TrajectoryInput) -> tuple[dict[str, Any], bool | None]:
     payload = _parse_payload(trajectory.content)
     metadata = {**_trajectory_metadata(payload), **trajectory.metadata}
-    source_metadata = {
-        "example_id": metadata.get("example_id"),
+    source_payload = {
+        "trajectory_id": trajectory.trajectory_id,
+        "query": metadata.get("query"),
         "dataset_name": metadata.get("dataset_name"),
-        "mas_type": metadata.get("mas_type"),
     }
-    if metadata.get("success") in (True, False):
-        source_metadata["success"] = metadata.get("success")
-    metrics = metadata.get("metrics")
-    if isinstance(metrics, dict) and metrics:
-        source_metadata["metrics"] = metrics
-    return {key: value for key, value in source_metadata.items() if value not in (None, "", [], {})}
+    success = metadata.get("success")
+    clean_source = {key: value for key, value in source_payload.items() if value not in (None, "", [], {})}
+    return clean_source, success if success in (True, False) else None
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
